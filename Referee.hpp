@@ -1002,8 +1002,12 @@ class Referee : public LibXR::Application {
    *
    */
   struct [[gnu::packed]] ChassisPack {
-    RobotStatus rs;        /* 等级和功率上限 */
-    uint16_t power_buffer; /* 底盘缓冲能量，单位 J */
+    RobotStatus rs;                              /* 等级和功率上限 */
+    uint16_t power_buffer;                       /* 底盘缓冲能量，单位 J */
+    uint32_t robot_status_received_time_ms = 0U; /* 0x0201 接收时间 */
+    bool robot_status_received = false;          /* 已收到有效 0x0201 */
+    uint32_t power_heat_received_time_ms = 0U;   /* 0x0202 接收时间 */
+    bool power_heat_received = false;            /* 已收到有效 0x0202 */
   };
 
   /**
@@ -1159,8 +1163,9 @@ class Referee : public LibXR::Application {
             referee_chassis_tp_name, nullptr, true)),
         launcherpack_topic_(LibXR::Topic::CreateTopic<LauncherPack>(
             referee_launcher_tp_name, nullptr, true)),
-        robot_game_referee_topic_(LibXR::Topic::CreateTopic<RobotGameRefereePack>(
-            referee_robot_game_tp_name, nullptr, true)),
+        robot_game_referee_topic_(
+            LibXR::Topic::CreateTopic<RobotGameRefereePack>(
+                referee_robot_game_tp_name, nullptr, true)),
         radar_pack_topic_(LibXR::Topic::CreateTopic<RadarPack>(
             referee_radar_tp_name, nullptr, true)) {
     UNUSED(hw);
@@ -1589,6 +1594,9 @@ class Referee : public LibXR::Application {
         if (!COPY_PAYLOAD(this->data_.robot_status)) {
           return false;
         }
+        this->robot_status_received_time_ms_ =
+            static_cast<uint32_t>(LibXR::Timebase::GetMilliseconds());
+        this->robot_status_received_ = true;
         break;
       }
 
@@ -1597,6 +1605,9 @@ class Referee : public LibXR::Application {
         if (!COPY_PAYLOAD(this->data_.power_heat)) {
           return false;
         }
+        this->power_heat_received_time_ms_ =
+            static_cast<uint32_t>(LibXR::Timebase::GetMilliseconds());
+        this->power_heat_received_ = true;
         break;
       }
 
@@ -1912,6 +1923,11 @@ class Referee : public LibXR::Application {
     }
     this->cp_.rs = this->data_.robot_status;
     this->cp_.power_buffer = this->data_.power_heat.chassis_pwr_buff;
+    this->cp_.robot_status_received_time_ms =
+        this->robot_status_received_time_ms_;
+    this->cp_.robot_status_received = this->robot_status_received_;
+    this->cp_.power_heat_received_time_ms = this->power_heat_received_time_ms_;
+    this->cp_.power_heat_received = this->power_heat_received_;
     this->chassispack_topic_.Publish(this->cp_);
     this->lp_.rs = this->data_.robot_status;
     this->lp_.rb = this->data_.robot_buff;
@@ -2007,7 +2023,12 @@ class Referee : public LibXR::Application {
 
   /* 线程相关 */
   uint64_t last_wake_up_; /* ms */
-  uint64_t video_link_remote_last_time_ = 0; /* 图传键鼠最近一次写入 CMD 的时间 */
+  uint32_t robot_status_received_time_ms_ = 0U;
+  uint32_t power_heat_received_time_ms_ = 0U;
+  bool robot_status_received_ = false;
+  bool power_heat_received_ = false;
+  uint64_t video_link_remote_last_time_ =
+      0;                                  /* 图传键鼠最近一次写入 CMD 的时间 */
   bool video_link_remote_online_ = false; /* 图传键鼠在线锁存，超时后清零 */
   LibXR::Thread thread_;
 };
