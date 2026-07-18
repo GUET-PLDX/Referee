@@ -13,7 +13,7 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: RM_Referee_2025
+module_description: RoboMaster 2026 referee protocol V2.0.0 parser
 constructor_args:
   - task_stack_depth_uart: 2048
   - uart: "uart_ref"
@@ -55,6 +55,8 @@ depends: []
 class Referee : public LibXR::Application {
  public:
   static constexpr uint32_t REFEREE_RX_TIMEOUT_MS = 50;
+  static constexpr uint32_t MAX_BUY_BULLET_NUM = (1U << 11U) - 1U;
+  static constexpr uint32_t MAX_REMOTE_BUY_BULLET_TIMES = (1U << 4U) - 1U;
 
   /**
    * @brief 用于0x0104
@@ -390,14 +392,16 @@ class Referee : public LibXR::Application {
    *
    */
   struct [[gnu::packed]] RobotHP {
-    uint16_t our_1_hero;     /* 己方1号英雄 */
-    uint16_t our_2_engineer; /* 己方2号工程 */
-    uint16_t our_3_infantry; /* 己方3号步兵 */
-    uint16_t our_4_infantry; /* 己方4号步兵 */
-    uint16_t res_1;          /* 保留位 */
-    uint16_t our_7_sentry;   /* 己方7号哨兵 */
-    uint16_t our_outpose;    /* 己方前哨站 */
-    uint16_t red_base;       /* 己方基地 */
+    uint16_t ally_1_robot_hp;  /* 己方1号英雄 */
+    uint16_t ally_2_robot_hp;  /* 己方2号工程 */
+    uint16_t ally_3_robot_hp;  /* 己方3号步兵 */
+    uint16_t ally_4_robot_hp;  /* 己方4号步兵 */
+    int16_t damage_difference; /* 己方与对方全队总伤害之差 */
+    uint16_t ally_7_robot_hp;  /* 己方7号哨兵 */
+    uint16_t ally_outpost_hp;  /* 己方前哨站 */
+    uint16_t ally_base_hp;     /* 己方基地 */
+    uint16_t enemy_outpost_hp; /* 对方前哨站 */
+    uint16_t enemy_base_hp;    /* 对方基地 */
   };
 
   /**
@@ -457,6 +461,7 @@ class Referee : public LibXR::Application {
     uint16_t shooter_cooling_value;    /* 机器人射击热量每秒冷却值 */
     uint16_t shooter_heat_limit;       /* 机器人射击热量上限 */
     uint16_t chassis_power_limit;      /* 机器人底盘功率上限 */
+    float bullet_speed_limit;          /* 机器人射击初速度上限 */
     uint8_t power_gimbal_output : 1;   /* gimbal输出，0为无输出，1为24V输出 */
     uint8_t power_chassis_output : 1;  /* chassis输出，0为无输出，1为24V输出*/
     uint8_t power_launcher_output : 1; /* shooter输出，0为无输出，1为24V 输出 */
@@ -540,42 +545,19 @@ class Referee : public LibXR::Application {
    *
    */
   struct [[gnu::packed]] RFID {
-    uint32_t own_base : 1;                /*己方基地增益点*/
-    uint32_t own_highland_center : 1;     /*己方中央高地增益点*/
-    uint32_t enemy_highland_center : 1;   /*对方中央高地增益点*/
-    uint32_t own_trapezium : 1;           /*己方梯形高地增益点*/
-    uint32_t enemy_trapezium : 1;         /*对方梯形高地增益点*/
-    uint32_t own_slope_before_R1B1 : 1;   /*己方飞坡点（靠近己方一侧飞坡前*/
-    uint32_t own_slope_after_R1B1 : 1;    /*己方飞坡点（靠近己方一侧飞坡后*/
-    uint32_t enemy_slope_before_R4B4 : 1; /*对方飞坡点（靠近己方一侧飞坡前*/
-    uint32_t enemy_slope_after_R4B4 : 1;  /*对方飞坡点（靠近己方一侧飞坡后*/
-    uint32_t own_terrain_crossing_up_R2B2 : 1;    /*己方地形增益(中央高地下方*/
-    uint32_t own_terrain_crossing_down_R2B2 : 1;  /*己方地形增益(中央高地上方*/
-    uint32_t enemy_terrain_corrssing_up_R2B2 : 1; /*对方地形增益(中央高地下方*/
-    uint32_t enemy_terrain_corrssing_down_R2B2 : 1; /*对方地形增益(中央高地上*/
-    uint32_t own_terrain_crossing_up_R3B3 : 1;      /*己方地形增益点(公路下方*/
-    uint32_t own_terrain_crossing_down_R3B3 : 1;    /*己方地形增益点(公路上方*/
-    uint32_t enemy_terrain_corrssing_up_R3B5 : 1;   /*对方地形增益点(公路下方*/
-    uint32_t enemy_terrain_corrssing_down_R3B3 : 1; /*对方地形增益(公路上方*/
-    uint32_t own_fortress : 1;                      /*己方堡垒增益点*/
-    uint32_t own_outpost : 1;                       /*己方前哨站增益点*/
-    uint32_t own_blood_supply_unoverlapping : 1; /*与资源区不重叠的/UL补给区*/
-    uint32_t own_blood_supply_overlapping : 1;   /*己方与资源区重叠的补给区*/
-    uint32_t own_assemble : 1;                   /*己方装配增益点*/
-    uint32_t enemy_assemble : 1;                 /*对方装配增益点*/
-    uint32_t center_resource_RMUL : 1;           /*中心增益点（仅 RMUL 适用）*/
-    uint32_t enemy_fortress : 1;                 /*对方堡垒增益点*/
-    uint32_t enemy_outpost : 1;                  /*对方前哨站增益点*/
-    uint32_t own_tunnel_cross_down : 1; /*己方隧道增益点（己方一侧公路区下方）*/
-    uint32_t own_tunnel_cross_up : 1;   /*己方隧道增益点（己方一侧公路区上方）*/
-    uint32_t own_tunnel_zrapezium_down : 1; /*己方隧道增益(己方梯形高地较低处*/
-    uint32_t own_tunnel_zrapezium_up : 1;   /*己方隧道增益(己方梯形高地较高处*/
-    uint32_t enemy_tunnel_cross_down : 1;   /*对方隧道增益（对方一侧公路区下方*/
-    uint32_t enemy_tunnel_cross_up : 1;     /*对方隧道增益（对方一侧公路区上方*/
-
-    uint32_t enemy_tunnel_zrapezium_down : 1; /*对方隧道增益(对方梯形高地低处*/
-    uint32_t enemy_tunnel_zrapezium_up : 1; /*对方隧道增益(对方梯形高地较高处*/
+    uint32_t rfid_status;  /* bit 0-31 */
+    uint8_t rfid_status_2; /* bit 32-37，bit 38-39 保留 */
   };
+
+  static_assert(sizeof(GameStatus) == 11, "0x0001 size mismatch");
+  static_assert(sizeof(RobotHP) == 20, "0x0003 size mismatch");
+  static_assert(sizeof(FieldEvents) == 4, "0x0101 size mismatch");
+  static_assert(sizeof(RobotStatus) == 17, "0x0201 size mismatch");
+  static_assert(sizeof(PowerHeat) == 14, "0x0202 size mismatch");
+  static_assert(sizeof(RobotBuff) == 8, "0x0204 size mismatch");
+  static_assert(sizeof(RobotDamage) == 1, "0x0206 size mismatch");
+  static_assert(sizeof(BulletRemain) == 8, "0x0208 size mismatch");
+  static_assert(sizeof(RFID) == 5, "0x0209 size mismatch");
 
   /**
    * @brief 0x020A 飞镖选手端指令数据, 3Hz
@@ -943,7 +925,7 @@ class Referee : public LibXR::Application {
    *
    */
   struct Data {
-    Status status;                              /* 在线状态 */
+    Status status = Status::OFFLINE;            /* 在线状态 */
     GameStatus game_status;                     /* 0x0001 */
     GameResult game_result;                     /* 0x0002 */
     RobotHP game_robot_hp;                      /* 0x0003 */
@@ -1020,20 +1002,42 @@ class Referee : public LibXR::Application {
     GUERRILLA = 3,
   };
 
+  static constexpr uint16_t SOURCE_GAME_STATUS = 1U << 0;
+  static constexpr uint16_t SOURCE_ROBOT_HP = 1U << 1;
+  static constexpr uint16_t SOURCE_FIELD_EVENT = 1U << 2;
+  static constexpr uint16_t SOURCE_ROBOT_STATUS = 1U << 3;
+  static constexpr uint16_t SOURCE_POWER_HEAT = 1U << 4;
+  static constexpr uint16_t SOURCE_ROBOT_POS = 1U << 5;
+  static constexpr uint16_t SOURCE_ROBOT_BUFF = 1U << 6;
+  static constexpr uint16_t SOURCE_ROBOT_DAMAGE = 1U << 7;
+  static constexpr uint16_t SOURCE_BULLET_REMAIN = 1U << 8;
+  static constexpr uint16_t SOURCE_RFID = 1U << 9;
+  static constexpr uint16_t SUPPORTED_SOURCE_MASK =
+      SOURCE_GAME_STATUS | SOURCE_ROBOT_HP | SOURCE_FIELD_EVENT |
+      SOURCE_ROBOT_STATUS | SOURCE_POWER_HEAT | SOURCE_ROBOT_POS |
+      SOURCE_ROBOT_BUFF | SOURCE_ROBOT_DAMAGE | SOURCE_BULLET_REMAIN |
+      SOURCE_RFID;
+
   /**
    * @brief 机器人、比赛和发射相关的裁判系统摘要
    *
    */
   struct [[gnu::packed]] RobotGameRefereePack {
-    RobotStatus robot_status;     /* 机器人状态 */
-    GameStatus game_status;       /* 比赛信息 */
-    SentryInfo sentry_info;       /*哨兵数据*/
-    RFID rfid;                    /*机器人RFID模块状态*/
-    uint16_t bullet_17_remain;    /*  17mm 弹丸允许发弹量 */
-    uint16_t our_outpose;         /* 己方前哨站 */
-    uint16_t red_base;            /* 己方基地 */
-    RobotPosForSentry sentry_pos; /* 0x020B */
+    RobotStatus robot_status;
+    GameStatus game_status;
+    RobotHP robot_hp;
+    FieldEvents field_event;
+    PowerHeat power_heat;
     RobotPOS robot_pos;
+    RobotBuff robot_buff;
+    RobotDamage robot_damage;
+    BulletRemain bullet_remain;
+    RFID rfid;
+    SentryInfo sentry_info;
+    RobotPosForSentry sentry_pos;
+    uint16_t source_command_id = 0U;
+    uint16_t source_valid_mask = 0U;
+    bool referee_online = false;
   };
 
   /**
@@ -1048,13 +1052,22 @@ class Referee : public LibXR::Application {
   };
 
   /**
-   * @brief 设置哨兵将要兑换的发弹量值
-   *
-   * @param need_bullet 需要兑换的发弹量
+   * @brief 增加哨兵本次要兑换的发弹量
    */
-  void SetNeedBullet(uint8_t need_bullet) {
+  LibXR::ErrorCode AddNeedBullet(uint16_t bullet_delta) {
+    if (bullet_delta == 0U) {
+      return LibXR::ErrorCode::ARG_ERR;
+    }
+
     LibXR::Mutex::LockGuard lock(tx_data_mutex_);
-    this->data_.sentry_dec_data.buy_bullet_num += need_bullet;
+    const uint32_t UPDATED_BULLET_NUM =
+        this->data_.sentry_dec_data.buy_bullet_num + bullet_delta;
+    if (UPDATED_BULLET_NUM > MAX_BUY_BULLET_NUM) {
+      return LibXR::ErrorCode::OUT_OF_RANGE;
+    }
+
+    this->data_.sentry_dec_data.buy_bullet_num = UPDATED_BULLET_NUM;
+    return LibXR::ErrorCode::OK;
   }
 
   /**
@@ -1068,14 +1081,17 @@ class Referee : public LibXR::Application {
   }
 
   /**
-   * @brief 哨兵远程兑换发弹量
-   *
-   * @param bullet_number 要买的发弹量
+   * @brief 请求一次哨兵远程兑换发弹量
    */
-  void SetBulletRemote(uint8_t bullet_number) {
+  LibXR::ErrorCode RequestRemoteBulletExchange() {
     LibXR::Mutex::LockGuard lock(tx_data_mutex_);
-    this->data_.sentry_dec_data.remote_buy_bullet_times += 1;
-    this->data_.sentry_dec_data.buy_bullet_num += bullet_number;
+    if (this->data_.sentry_dec_data.remote_buy_bullet_times >=
+        MAX_REMOTE_BUY_BULLET_TIMES) {
+      return LibXR::ErrorCode::OUT_OF_RANGE;
+    }
+
+    this->data_.sentry_dec_data.remote_buy_bullet_times++;
+    return LibXR::ErrorCode::OK;
   }
 
   /**
@@ -1476,6 +1492,7 @@ class Referee : public LibXR::Application {
       if (this->uart_->Read({&this->byte_, 1}, this->op_) !=
           LibXR::ErrorCode::OK) {
         this->data_.status = Status::OFFLINE;
+        PublishRefereeStatusIfChanged(false);
         this->CheckVideoLinkRemoteOffline();
         continue;
       }
@@ -1864,6 +1881,7 @@ class Referee : public LibXR::Application {
         return false;
       }
     }
+    UpdateRefereeSource(static_cast<CommandID>(CMD_ID));
     return true;
   }
 
@@ -1937,16 +1955,19 @@ class Referee : public LibXR::Application {
     this->launcherpack_topic_.Publish(this->lp_);
     this->robot_game_referee_pack_.robot_status = this->data_.robot_status;
     this->robot_game_referee_pack_.game_status = this->data_.game_status;
-    this->robot_game_referee_pack_.sentry_info = this->data_.sentry_decision;
-    this->robot_game_referee_pack_.rfid = this->data_.rfid;
-    this->robot_game_referee_pack_.bullet_17_remain =
-        this->data_.bullet_remain.bullet_17_remain;
-    this->robot_game_referee_pack_.our_outpose =
-        this->data_.game_robot_hp.our_outpose;
-    this->robot_game_referee_pack_.red_base =
-        this->data_.game_robot_hp.red_base;
-    this->robot_game_referee_pack_.sentry_pos = this->data_.sentry_pos;
+    this->robot_game_referee_pack_.robot_hp = this->data_.game_robot_hp;
+    this->robot_game_referee_pack_.field_event = this->data_.field_event;
+    this->robot_game_referee_pack_.power_heat = this->data_.power_heat;
     this->robot_game_referee_pack_.robot_pos = this->data_.robot_pos;
+    this->robot_game_referee_pack_.robot_buff = this->data_.robot_buff;
+    this->robot_game_referee_pack_.robot_damage = this->data_.robot_damage;
+    this->robot_game_referee_pack_.bullet_remain = this->data_.bullet_remain;
+    this->robot_game_referee_pack_.rfid = this->data_.rfid;
+    this->robot_game_referee_pack_.sentry_info = this->data_.sentry_decision;
+    this->robot_game_referee_pack_.sentry_pos = this->data_.sentry_pos;
+    this->robot_game_referee_pack_.source_command_id = source_command_id_;
+    this->robot_game_referee_pack_.source_valid_mask = source_valid_mask_;
+    this->robot_game_referee_pack_.referee_online = referee_online_;
     this->robot_game_referee_topic_.Publish(this->robot_game_referee_pack_);
     UpdateRadarPack();
     // this->radar_pack_topic_.Publish(this->radar_pack_);
@@ -1956,6 +1977,64 @@ class Referee : public LibXR::Application {
 
  private:
   static constexpr uint64_t VIDEO_LINK_REMOTE_TIMEOUT_MS = 100;
+
+  void UpdateRefereeSource(CommandID command_id) {
+    uint16_t source_mask = 0U;
+    switch (command_id) {
+      case CommandID::REF_CMD_ID_GAME_STATUS:
+        source_mask = SOURCE_GAME_STATUS;
+        break;
+      case CommandID::REF_CMD_ID_GAME_ROBOT_HP:
+        source_mask = SOURCE_ROBOT_HP;
+        break;
+      case CommandID::REF_CMD_ID_FIELD_EVENTS:
+        source_mask = SOURCE_FIELD_EVENT;
+        break;
+      case CommandID::REF_CMD_ID_ROBOT_STATUS:
+        source_mask = SOURCE_ROBOT_STATUS;
+        break;
+      case CommandID::REF_CMD_ID_POWER_HEAT_DATA:
+        source_mask = SOURCE_POWER_HEAT;
+        break;
+      case CommandID::REF_CMD_ID_ROBOT_POS:
+        source_mask = SOURCE_ROBOT_POS;
+        break;
+      case CommandID::REF_CMD_ID_ROBOT_BUFF:
+        source_mask = SOURCE_ROBOT_BUFF;
+        break;
+      case CommandID::REF_CMD_ID_ROBOT_DMG:
+        source_mask = SOURCE_ROBOT_DAMAGE;
+        break;
+      case CommandID::REF_CMD_ID_BULLET_REMAINING:
+        source_mask = SOURCE_BULLET_REMAIN;
+        break;
+      case CommandID::REF_CMD_ID_RFID:
+        source_mask = SOURCE_RFID;
+        break;
+      default:
+        break;
+    }
+
+    referee_online_ = true;
+    source_command_id_ = static_cast<uint16_t>(command_id);
+    source_valid_mask_ |= source_mask;
+  }
+
+  void PublishRefereeStatusIfChanged(bool online) {
+    if (referee_online_ == online) {
+      return;
+    }
+
+    referee_online_ = online;
+    source_command_id_ = 0U;
+    if (!online) {
+      source_valid_mask_ = 0U;
+    }
+    robot_game_referee_pack_.source_command_id = source_command_id_;
+    robot_game_referee_pack_.source_valid_mask = source_valid_mask_;
+    robot_game_referee_pack_.referee_online = referee_online_;
+    robot_game_referee_topic_.Publish(robot_game_referee_pack_);
+  }
 
   void CheckVideoLinkRemoteOffline() {
     if (cmd_ == nullptr || !video_link_remote_online_) {
@@ -2009,7 +2088,7 @@ class Referee : public LibXR::Application {
     Header header_;
     uint8_t buf_[251]; /* 缓冲区，对齐256 */
   } pack_;
-  Data data_; /* 数据包本体 */
+  Data data_{}; /* 数据包本体 */
   LibXR::Topic chassispack_topic_;
   ChassisPack cp_; /* 发给底盘的数据包缓冲 */
   LibXR::Topic launcherpack_topic_;
@@ -2027,6 +2106,9 @@ class Referee : public LibXR::Application {
   uint32_t power_heat_received_time_ms_ = 0U;
   bool robot_status_received_ = false;
   bool power_heat_received_ = false;
+  uint16_t source_command_id_ = 0U;
+  uint16_t source_valid_mask_ = 0U;
+  bool referee_online_ = false;
   uint64_t video_link_remote_last_time_ =
       0;                                  /* 图传键鼠最近一次写入 CMD 的时间 */
   bool video_link_remote_online_ = false; /* 图传键鼠在线锁存，超时后清零 */
