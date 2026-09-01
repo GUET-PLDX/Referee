@@ -37,6 +37,7 @@ depends: []
 #include "app_framework.hpp"
 #include "crc.hpp"
 #include "libxr_def.hpp"
+#include "libxr_mem.hpp"
 #include "libxr_time.hpp"
 #include "libxr_type.hpp"
 #include "message.hpp"
@@ -1008,6 +1009,7 @@ class Referee : public LibXR::Application {
   static constexpr uint16_t SOURCE_ROBOT_STATUS = 1U << 3;
   static constexpr uint16_t SOURCE_POWER_HEAT = 1U << 4;
   static constexpr uint16_t SOURCE_ROBOT_POS = 1U << 5;
+  static constexpr uint16_t SOURCE_SENTRY_POS = 1U << 10;
   static constexpr uint16_t SOURCE_ROBOT_BUFF = 1U << 6;
   static constexpr uint16_t SOURCE_ROBOT_DAMAGE = 1U << 7;
   static constexpr uint16_t SOURCE_BULLET_REMAIN = 1U << 8;
@@ -1016,7 +1018,7 @@ class Referee : public LibXR::Application {
       SOURCE_GAME_STATUS | SOURCE_ROBOT_HP | SOURCE_FIELD_EVENT |
       SOURCE_ROBOT_STATUS | SOURCE_POWER_HEAT | SOURCE_ROBOT_POS |
       SOURCE_ROBOT_BUFF | SOURCE_ROBOT_DAMAGE | SOURCE_BULLET_REMAIN |
-      SOURCE_RFID;
+      SOURCE_RFID | SOURCE_SENTRY_POS;
 
   /**
    * @brief 机器人、比赛和发射相关的裁判系统摘要
@@ -1038,6 +1040,8 @@ class Referee : public LibXR::Application {
     uint16_t source_command_id = 0U;
     uint16_t source_valid_mask = 0U;
     bool referee_online = false;
+    uint32_t robot_hp_received_time_ms = 0U;
+    uint32_t sentry_pos_received_time_ms = 0U;
   };
 
   /**
@@ -1305,7 +1309,7 @@ class Referee : public LibXR::Application {
     uint16_t text_len = 0;
     if (text != nullptr) {
       text_len = static_cast<uint16_t>(strnlen(text, sizeof(fig.data)));
-      memcpy(fig.data, text, text_len);
+      LibXR::Memory::FastCopy(fig.data, text, text_len);
     }
     fig.grapic_data_struct.details_b = text_len;
     fig.grapic_data_struct.width = width;
@@ -1726,8 +1730,9 @@ class Referee : public LibXR::Application {
         if (PAYLOAD_LEN < 6) {
           return false;
         }
-        memset(this->data_.robot_ineraction_data.user_data, 0,
-               sizeof(this->data_.robot_ineraction_data.user_data));
+        LibXR::Memory::FastSet(
+            this->data_.robot_ineraction_data.user_data, 0,
+            sizeof(this->data_.robot_ineraction_data.user_data));
         LibXR::Memory::FastCopy(&this->data_.robot_ineraction_data, payload, 6);
         const size_t USER_DATA_LEN = std::min<size_t>(
             PAYLOAD_LEN - 6,
@@ -1968,6 +1973,10 @@ class Referee : public LibXR::Application {
     this->robot_game_referee_pack_.source_command_id = source_command_id_;
     this->robot_game_referee_pack_.source_valid_mask = source_valid_mask_;
     this->robot_game_referee_pack_.referee_online = referee_online_;
+    this->robot_game_referee_pack_.robot_hp_received_time_ms =
+        robot_hp_received_time_ms_;
+    this->robot_game_referee_pack_.sentry_pos_received_time_ms =
+        sentry_pos_received_time_ms_;
     this->robot_game_referee_topic_.Publish(this->robot_game_referee_pack_);
     UpdateRadarPack();
     // this->radar_pack_topic_.Publish(this->radar_pack_);
@@ -1986,6 +1995,8 @@ class Referee : public LibXR::Application {
         break;
       case CommandID::REF_CMD_ID_GAME_ROBOT_HP:
         source_mask = SOURCE_ROBOT_HP;
+        robot_hp_received_time_ms_ =
+            static_cast<uint32_t>(LibXR::Timebase::GetMilliseconds());
         break;
       case CommandID::REF_CMD_ID_FIELD_EVENTS:
         source_mask = SOURCE_FIELD_EVENT;
@@ -1998,6 +2009,11 @@ class Referee : public LibXR::Application {
         break;
       case CommandID::REF_CMD_ID_ROBOT_POS:
         source_mask = SOURCE_ROBOT_POS;
+        break;
+      case CommandID::REF_CMD_ID_ROBOT_POS_TO_SENTRY:
+        source_mask = SOURCE_SENTRY_POS;
+        sentry_pos_received_time_ms_ =
+            static_cast<uint32_t>(LibXR::Timebase::GetMilliseconds());
         break;
       case CommandID::REF_CMD_ID_ROBOT_BUFF:
         source_mask = SOURCE_ROBOT_BUFF;
@@ -2029,6 +2045,8 @@ class Referee : public LibXR::Application {
     source_command_id_ = 0U;
     if (!online) {
       source_valid_mask_ = 0U;
+      sentry_pos_received_time_ms_ = 0U;
+      robot_hp_received_time_ms_ = 0U;
     }
     robot_game_referee_pack_.source_command_id = source_command_id_;
     robot_game_referee_pack_.source_valid_mask = source_valid_mask_;
@@ -2108,6 +2126,8 @@ class Referee : public LibXR::Application {
   bool power_heat_received_ = false;
   uint16_t source_command_id_ = 0U;
   uint16_t source_valid_mask_ = 0U;
+  uint32_t sentry_pos_received_time_ms_ = 0U;
+  uint32_t robot_hp_received_time_ms_ = 0U;
   bool referee_online_ = false;
   uint64_t video_link_remote_last_time_ =
       0;                                  /* 图传键鼠最近一次写入 CMD 的时间 */
