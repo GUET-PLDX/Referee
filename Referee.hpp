@@ -1905,22 +1905,22 @@ class Referee : public LibXR::Application {
 
     const uint16_t KEY = rc.keyboard_value;
     if (KEY & static_cast<uint16_t>(KeyBoard::KEY_A)) {
-      cmd_data.chassis.x -= 0.5f;
+      cmd_data.chassis.operator_input.x -= 0.5f;
     }
     if (KEY & static_cast<uint16_t>(KeyBoard::KEY_D)) {
-      cmd_data.chassis.x += 0.5f;
+      cmd_data.chassis.operator_input.x += 0.5f;
     }
     if (KEY & static_cast<uint16_t>(KeyBoard::KEY_S)) {
-      cmd_data.chassis.y -= 0.5f;
+      cmd_data.chassis.operator_input.y -= 0.5f;
     }
     if (KEY & static_cast<uint16_t>(KeyBoard::KEY_W)) {
-      cmd_data.chassis.y += 0.5f;
+      cmd_data.chassis.operator_input.y += 0.5f;
     }
     if (KEY & static_cast<uint16_t>(KeyBoard::KEY_SHIFT)) {
-      cmd_data.chassis.x *= 2.0f;
-      cmd_data.chassis.y *= 2.0f;
+      cmd_data.chassis.operator_input.x *= 2.0f;
+      cmd_data.chassis.operator_input.y *= 2.0f;
     }
-    cmd_data.chassis.z = 0.0f;
+    cmd_data.chassis.operator_input.z = 0.0f;
 
     cmd_data.gimbal.pit = -static_cast<float>(rc.mouse_y) * MOUSE_SCALER;
     cmd_data.gimbal.yaw = -static_cast<float>(rc.mouse_x) * MOUSE_SCALER;
@@ -2066,9 +2066,9 @@ class Referee : public LibXR::Application {
 
     CMD::Data cmd_data{};
     /* 图传键鼠断流后只下发一次离线零命令，避免 CMD 长期保持在线状态。 */
-    cmd_data.chassis.x = 0.0f;
-    cmd_data.chassis.y = 0.0f;
-    cmd_data.chassis.z = 0.0f;
+    cmd_data.chassis.operator_input.x = 0.0f;
+    cmd_data.chassis.operator_input.y = 0.0f;
+    cmd_data.chassis.operator_input.z = 0.0f;
     cmd_data.gimbal.pit = 0.0f;
     cmd_data.gimbal.yaw = 0.0f;
     cmd_data.gimbal.rol = 0.0f;
