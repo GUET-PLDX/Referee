@@ -1993,7 +1993,7 @@ class Referee : public LibXR::Application {
   void OnMonitor() override { CheckVideoLinkRemoteOffline(); }
 
  private:
-  static constexpr uint64_t VIDEO_LINK_REMOTE_TIMEOUT_MS = 100;
+  static constexpr uint32_t VIDEO_LINK_REMOTE_TIMEOUT_MS = 100;
 
   void UpdateRefereeSource(CommandID command_id) {
     uint16_t source_mask = 0U;
@@ -2073,8 +2073,9 @@ class Referee : public LibXR::Application {
       return;
     }
 
-    const uint64_t NOW = LibXR::Timebase::GetMilliseconds();
-    if (NOW - video_link_remote_last_time_ <= VIDEO_LINK_REMOTE_TIMEOUT_MS) {
+    const LibXR::MillisecondTimestamp NOW = LibXR::Timebase::GetMilliseconds();
+    if ((NOW - video_link_remote_last_time_).ToMillisecond() <=
+        VIDEO_LINK_REMOTE_TIMEOUT_MS) {
       return;
     }
 
@@ -2134,7 +2135,7 @@ class Referee : public LibXR::Application {
   bool last_parse_; /* 上一次解包是否成功 */
 
   /* 线程相关 */
-  uint64_t last_wake_up_; /* ms */
+  LibXR::MillisecondTimestamp last_wake_up_; /* ms */
   uint32_t robot_status_received_time_ms_ = 0U;
   uint32_t power_heat_received_time_ms_ = 0U;
   bool robot_status_received_ = false;
@@ -2144,8 +2145,8 @@ class Referee : public LibXR::Application {
   uint32_t sentry_pos_received_time_ms_ = 0U;
   uint32_t robot_hp_received_time_ms_ = 0U;
   bool referee_online_ = false;
-  uint64_t video_link_remote_last_time_ =
-      0;                                  /* 图传键鼠最近一次写入 CMD 的时间 */
+  LibXR::MillisecondTimestamp
+      video_link_remote_last_time_{}; /* 图传键鼠最近一次写入 CMD 的时间 */
   bool video_link_remote_online_ = false; /* 图传键鼠在线锁存，超时后清零 */
   LibXR::Thread thread_;
 };
