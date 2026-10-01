@@ -1173,7 +1173,7 @@ class Referee : public LibXR::Application {
               LibXR::Thread::Priority::LOW,
           CMD* cmd = nullptr)
 
-      : uart_(hw.Find<LibXR::UART>(uart)),
+      : uart_(hw.template FindOrExit<LibXR::UART>({uart})),
         sem_(0),
         op_(sem_, REFEREE_RX_TIMEOUT_MS),
         sem_tx_(),
@@ -1188,12 +1188,11 @@ class Referee : public LibXR::Application {
                 referee_robot_game_tp_name, nullptr, true)),
         radar_pack_topic_(LibXR::Topic::CreateTopic<RadarPack>(
             referee_radar_tp_name, nullptr, true)) {
-    UNUSED(hw);
     UNUSED(app);
     uart_->SetConfig({baudrate, LibXR::UART::Parity::NO_PARITY, 8, 1});
 
     this->thread_.Create(this, ThreadFunc, "Referee", task_stack_depth_uart,
-                         LibXR::Thread::Priority::MEDIUM);
+                         thread_priority_uart);
   }
 
   void BindCMD(CMD& cmd) { cmd_ = &cmd; }
