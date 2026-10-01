@@ -1188,11 +1188,12 @@ class Referee : public LibXR::Application {
                 referee_robot_game_tp_name, nullptr, true)),
         radar_pack_topic_(LibXR::Topic::CreateTopic<RadarPack>(
             referee_radar_tp_name, nullptr, true)) {
-    UNUSED(app);
     uart_->SetConfig({baudrate, LibXR::UART::Parity::NO_PARITY, 8, 1});
 
     this->thread_.Create(this, ThreadFunc, "Referee", task_stack_depth_uart,
                          thread_priority_uart);
+
+    app.Register(*this);
   }
 
   void BindCMD(CMD& cmd) { cmd_ = &cmd; }
@@ -1904,6 +1905,9 @@ class Referee : public LibXR::Application {
       return;
     }
 
+    /* 与 CheckVideoLinkRemoteOffline 互斥，防止离线零命令覆盖新的键鼠命令 */
+    LibXR::Mutex::LockGuard lock(video_link_mutex_);
+
     constexpr float MOUSE_SCALER = 1000.0f / 32768.0f;
     CMD::Data cmd_data{};
 
@@ -2059,7 +2063,13 @@ class Referee : public LibXR::Application {
   }
 
   void CheckVideoLinkRemoteOffline() {
-    if (cmd_ == nullptr || !video_link_remote_online_) {
+    if (cmd_ == nullptr) {
+      return;
+    }
+
+    /* 裁判线程和 OnMonitor 都会调用，判定与下发需在同一把锁内完成 */
+    LibXR::Mutex::LockGuard lock(video_link_mutex_);
+    if (!video_link_remote_online_) {
       return;
     }
 
@@ -2100,6 +2110,7 @@ class Referee : public LibXR::Application {
   LibXR::WriteOperation tx_op_;
   LibXR::Mutex tx_mutex_;
   LibXR::Mutex tx_data_mutex_;
+  LibXR::Mutex video_link_mutex_; /* 保护图传键鼠在线状态 */
   CMD* cmd_;
   uint8_t tx_buf_[256]{};
   uint8_t tx_seq_ = 0;
