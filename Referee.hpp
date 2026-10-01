@@ -1506,9 +1506,14 @@ class Referee : public LibXR::Application {
       }
 
       this->pack_.header_.sof = this->byte_;
-      this->uart_->Read({reinterpret_cast<uint8_t*>(&this->pack_.header_) + 1,
-                         sizeof(Header) - 1},
-                        this->op_);
+      /* 包头读取失败时缓冲区是旧数据，不能参与 CRC8 校验，直接重新找包头 */
+      if (this->uart_->Read(
+              {reinterpret_cast<uint8_t*>(&this->pack_.header_) + 1,
+               sizeof(Header) - 1},
+              this->op_) != LibXR::ErrorCode::OK) {
+        this->CheckVideoLinkRemoteOffline();
+        continue;
+      }
 
       if (LibXR::CRC8::Verify(reinterpret_cast<uint8_t*>(&this->pack_.header_),
                               sizeof(Header))) {
