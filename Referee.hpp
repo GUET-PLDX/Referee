@@ -14,17 +14,6 @@
 // clang-format off
 /* === MODULE MANIFEST V2 ===
 module_description: RoboMaster 2026 referee protocol V2.0.0 parser
-constructor_args:
-  - task_stack_depth_uart: 2048
-  - uart: "uart_ref"
-  - baudrate: 115200
-  - referee_chassis_tp_name: "chassis_ref"
-  - referee_launcher_tp_name: "launcher_ref"
-  - referee_robot_game_tp_name: "robot_game_ref"
-  - referee_radar_tp_name: "radar_ref"
-
-  - thread_priority_uart: LibXR::Thread::Priority::LOW
-required_hardware: dma uart
 depends: []
 === END MANIFEST === */
 // clang-format on
@@ -34,8 +23,8 @@ depends: []
 #include <cstring>
 
 #include "CMD.hpp"
-#include "app_framework.hpp"
 #include "crc.hpp"
+#include "libxr.hpp"
 #include "libxr_def.hpp"
 #include "libxr_mem.hpp"
 #include "libxr_time.hpp"
@@ -53,7 +42,7 @@ depends: []
  * @note 位域在Linux gcc/clang和arm-none-eabi-gcc
  *       的行为是一样的
  */
-class Referee : public LibXR::Application {
+class Referee {
  public:
   static constexpr uint32_t REFEREE_RX_TIMEOUT_MS = 50;
   static constexpr uint32_t MAX_BUY_BULLET_NUM = (1U << 11U) - 1U;
@@ -1157,14 +1146,11 @@ class Referee : public LibXR::Application {
   /**
    * @brief Construct a new Referee object
    *
-   * @param hw
-   * @param app
    * @param task_stack_depth_uart
    * @param uart
    * @param baudrate
    */
-  Referee(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
-          uint32_t task_stack_depth_uart, const char* uart, uint32_t baudrate,
+  Referee(uint32_t task_stack_depth_uart, LibXR::UART& uart, uint32_t baudrate,
           const char* referee_chassis_tp_name,
           const char* referee_launcher_tp_name,
           const char* referee_robot_game_tp_name,
@@ -1173,7 +1159,7 @@ class Referee : public LibXR::Application {
               LibXR::Thread::Priority::LOW,
           CMD* cmd = nullptr)
 
-      : uart_(hw.template FindOrExit<LibXR::UART>({uart})),
+      : uart_((&uart)),
         sem_(0),
         op_(sem_, REFEREE_RX_TIMEOUT_MS),
         sem_tx_(),
@@ -1192,8 +1178,6 @@ class Referee : public LibXR::Application {
 
     this->thread_.Create(this, ThreadFunc, "Referee", task_stack_depth_uart,
                          thread_priority_uart);
-
-    app.Register(*this);
   }
 
   void BindCMD(CMD& cmd) { cmd_ = &cmd; }
@@ -1990,7 +1974,7 @@ class Referee : public LibXR::Application {
     // this->radar_pack_topic_.Publish(this->radar_pack_);
   }
 
-  void OnMonitor() override { CheckVideoLinkRemoteOffline(); }
+  void OnMonitor() { CheckVideoLinkRemoteOffline(); }
 
  private:
   static constexpr uint32_t VIDEO_LINK_REMOTE_TIMEOUT_MS = 100;
@@ -2146,7 +2130,7 @@ class Referee : public LibXR::Application {
   uint32_t robot_hp_received_time_ms_ = 0U;
   bool referee_online_ = false;
   LibXR::MillisecondTimestamp
-      video_link_remote_last_time_{}; /* 图传键鼠最近一次写入 CMD 的时间 */
+      video_link_remote_last_time_{};     /* 图传键鼠最近一次写入 CMD 的时间 */
   bool video_link_remote_online_ = false; /* 图传键鼠在线锁存，超时后清零 */
   LibXR::Thread thread_;
 };
