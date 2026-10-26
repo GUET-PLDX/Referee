@@ -1150,16 +1150,16 @@ class Referee {
    * @param uart
    * @param baudrate
    */
-  Referee(uint32_t task_stack_depth_uart, LibXR::UART& uart, uint32_t baudrate,
-          const char* referee_chassis_tp_name,
-          const char* referee_launcher_tp_name,
-          const char* referee_robot_game_tp_name,
-          const char* referee_radar_tp_name,
+  Referee(LibXR::UART& uart, CMD* cmd, uint32_t task_stack_depth_uart = 2048,
+          uint32_t baudrate = 115200,
+          const char* referee_chassis_tp_name = "chassis_ref",
+          const char* referee_launcher_tp_name = "launcher_ref",
+          const char* referee_robot_game_tp_name = "robot_game_ref",
+          const char* referee_radar_tp_name = "radar_ref",
           LibXR::Thread::Priority thread_priority_uart =
-              LibXR::Thread::Priority::LOW,
-          CMD* cmd = nullptr)
+              LibXR::Thread::Priority::LOW)
 
-      : uart_((&uart)),
+      : uart_(&uart),
         sem_(0),
         op_(sem_, REFEREE_RX_TIMEOUT_MS),
         sem_tx_(),
