@@ -1180,7 +1180,12 @@ class Referee {
                          thread_priority_uart);
   }
 
-  void BindCMD(CMD& cmd) { cmd_ = &cmd; }
+  // Initialization only, before the control task starts.
+  void BindCMD(CMD& cmd) {
+    REQUIRE(cmd_ == nullptr || cmd_ == &cmd);
+    if (cmd_ != nullptr) return;
+    cmd_ = &cmd;
+  }
 
   LibXR::ErrorCode SendFrame(CommandID cmd_id, const void* payload,
                              uint16_t PAYLOAD_LEN) {
@@ -1464,7 +1469,6 @@ class Referee {
       ref->FindHeader();
       ref->last_parse_ = ref->ParseData();
       ref->Publish();
-      ref->CheckVideoLinkRemoteOffline();
       // ref->uart_->Write(0b01010101, ref->op_);
       LibXR::Thread::Sleep(10);
     }
@@ -1481,12 +1485,10 @@ class Referee {
           LibXR::ErrorCode::OK) {
         this->data_.status = Status::OFFLINE;
         PublishRefereeStatusIfChanged(false);
-        this->CheckVideoLinkRemoteOffline();
         continue;
       }
 
       if (this->byte_ != 0xA5) {
-        this->CheckVideoLinkRemoteOffline();
         continue;
       }
 
@@ -1496,7 +1498,6 @@ class Referee {
               {reinterpret_cast<uint8_t*>(&this->pack_.header_) + 1,
                sizeof(Header) - 1},
               this->op_) != LibXR::ErrorCode::OK) {
-        this->CheckVideoLinkRemoteOffline();
         continue;
       }
 
@@ -1505,8 +1506,6 @@ class Referee {
         this->data_.status = Status::RUNNING;
         break;
       }
-
-      this->CheckVideoLinkRemoteOffline();
     }
   }
 
@@ -1880,16 +1879,12 @@ class Referee {
   }
 
   /**
-   * @brief 把图传链路的遥控数据传给CMD
+   * @brief 缓存图传遥控数据，由 CMD 所属任务提交
    *
    * @param rc
    */
   void FeedVideoLinkRemoteToCMD(const KeyboardMouse& rc) {
-    if (cmd_ == nullptr) {
-      return;
-    }
-
-    /* 与 CheckVideoLinkRemoteOffline 互斥，防止离线零命令覆盖新的键鼠命令 */
+    /* 接收线程仅缓存，控制任务负责超时与提交。 */
     LibXR::Mutex::LockGuard lock(video_link_mutex_);
 
     constexpr float MOUSE_SCALER = 1000.0f / 32768.0f;
@@ -1897,22 +1892,22 @@ class Referee {
 
     const uint16_t KEY = rc.keyboard_value;
     if (KEY & static_cast<uint16_t>(KeyBoard::KEY_A)) {
-      cmd_data.chassis.operator_input.x -= 0.5f;
+      cmd_data.chassis.vx -= 0.5f;
     }
     if (KEY & static_cast<uint16_t>(KeyBoard::KEY_D)) {
-      cmd_data.chassis.operator_input.x += 0.5f;
+      cmd_data.chassis.vx += 0.5f;
     }
     if (KEY & static_cast<uint16_t>(KeyBoard::KEY_S)) {
-      cmd_data.chassis.operator_input.y -= 0.5f;
+      cmd_data.chassis.vy -= 0.5f;
     }
     if (KEY & static_cast<uint16_t>(KeyBoard::KEY_W)) {
-      cmd_data.chassis.operator_input.y += 0.5f;
+      cmd_data.chassis.vy += 0.5f;
     }
     if (KEY & static_cast<uint16_t>(KeyBoard::KEY_SHIFT)) {
-      cmd_data.chassis.operator_input.x *= 2.0f;
-      cmd_data.chassis.operator_input.y *= 2.0f;
+      cmd_data.chassis.vx *= 2.0f;
+      cmd_data.chassis.vy *= 2.0f;
     }
-    cmd_data.chassis.operator_input.z = 0.0f;
+    cmd_data.chassis.wz = 0.0f;
 
     cmd_data.gimbal.pit = -static_cast<float>(rc.mouse_y) * MOUSE_SCALER;
     cmd_data.gimbal.yaw = -static_cast<float>(rc.mouse_x) * MOUSE_SCALER;
@@ -1922,9 +1917,16 @@ class Referee {
     cmd_data.chassis_online = true;
     cmd_data.gimbal_online = true;
     cmd_data.ctrl_source = CMD::ControlSource::CTRL_SOURCE_RC;
-    cmd_->FeedRC(cmd_data);
+    video_link_pending_ = cmd_data;
+    video_link_dirty_ = true;
+    video_link_stop_pending_ |= !cmd_data.launcher.isfire;
 
-    video_link_remote_last_time_ = LibXR::Timebase::GetMilliseconds();
+    const auto now = LibXR::Timebase::GetMilliseconds();
+    video_link_gap_pending_ |=
+        video_link_remote_online_ &&
+        (now - video_link_remote_last_time_).ToMillisecond() >
+            VIDEO_LINK_REMOTE_TIMEOUT_MS;
+    video_link_remote_last_time_ = now;
     video_link_remote_online_ = true;
   }
 
@@ -1974,7 +1976,9 @@ class Referee {
     // this->radar_pack_topic_.Publish(this->radar_pack_);
   }
 
-  void OnMonitor() { CheckVideoLinkRemoteOffline(); }
+  void OnMonitor() {
+    if (cmd_ != nullptr) ConsumeVideoLink();
+  }
 
  private:
   static constexpr uint32_t VIDEO_LINK_REMOTE_TIMEOUT_MS = 100;
@@ -2046,38 +2050,33 @@ class Referee {
     robot_game_referee_topic_.Publish(robot_game_referee_pack_);
   }
 
-  void CheckVideoLinkRemoteOffline() {
-    if (cmd_ == nullptr) {
-      return;
+  void ConsumeVideoLink() {
+    CMD::Data data{};
+    bool publish = false;
+    {
+      LibXR::Mutex::LockGuard lock(video_link_mutex_);
+      if (video_link_gap_pending_) {
+        video_link_gap_pending_ = false;
+        data.ctrl_source = CMD::ControlSource::CTRL_SOURCE_RC;
+        // Keep the fresh buffered frame for the next owner cycle.
+        publish = true;
+      } else {
+        const auto now = LibXR::Timebase::GetMilliseconds();
+        const bool fresh =
+            video_link_remote_online_ &&
+            (now - video_link_remote_last_time_).ToMillisecond() <=
+                VIDEO_LINK_REMOTE_TIMEOUT_MS;
+        if (fresh) data = video_link_pending_;
+        if (video_link_stop_pending_) data.launcher.isfire = false;
+        publish = video_link_dirty_ || video_link_stop_pending_ ||
+                  (!fresh && video_link_remote_online_);
+        video_link_dirty_ = fresh && video_link_stop_pending_ &&
+                            video_link_pending_.launcher.isfire;
+        video_link_stop_pending_ = false;
+        if (!fresh) video_link_remote_online_ = false;
+      }
     }
-
-    /* 裁判线程和 OnMonitor 都会调用，判定与下发需在同一把锁内完成 */
-    LibXR::Mutex::LockGuard lock(video_link_mutex_);
-    if (!video_link_remote_online_) {
-      return;
-    }
-
-    const LibXR::MillisecondTimestamp NOW = LibXR::Timebase::GetMilliseconds();
-    if ((NOW - video_link_remote_last_time_).ToMillisecond() <=
-        VIDEO_LINK_REMOTE_TIMEOUT_MS) {
-      return;
-    }
-
-    CMD::Data cmd_data{};
-    /* 图传键鼠断流后只下发一次离线零命令，避免 CMD 长期保持在线状态。 */
-    cmd_data.chassis.operator_input.x = 0.0f;
-    cmd_data.chassis.operator_input.y = 0.0f;
-    cmd_data.chassis.operator_input.z = 0.0f;
-    cmd_data.gimbal.pit = 0.0f;
-    cmd_data.gimbal.yaw = 0.0f;
-    cmd_data.gimbal.rol = 0.0f;
-    cmd_data.launcher.isfire = false;
-    cmd_data.chassis_online = false;
-    cmd_data.gimbal_online = false;
-    cmd_data.ctrl_source = CMD::ControlSource::CTRL_SOURCE_RC;
-    cmd_->FeedRC(cmd_data);
-
-    video_link_remote_online_ = false;
+    if (publish) cmd_->FeedRC(CMD::RCInputSource::RC_INPUT_REFEREE, data);
   }
 
   void UpdateRadarPack() {
@@ -2095,7 +2094,11 @@ class Referee {
   LibXR::WriteOperation tx_op_;
   LibXR::Mutex tx_mutex_;
   LibXR::Mutex tx_data_mutex_;
-  LibXR::Mutex video_link_mutex_; /* 保护图传键鼠在线状态 */
+  LibXR::Mutex video_link_mutex_;
+  CMD::Data video_link_pending_{};
+  bool video_link_dirty_ = false;
+  bool video_link_gap_pending_ = false;
+  bool video_link_stop_pending_ = false; /* 保护图传键鼠在线状态 */
   CMD* cmd_;
   uint8_t tx_buf_[256]{};
   uint8_t tx_seq_ = 0;

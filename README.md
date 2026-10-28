@@ -30,3 +30,5 @@ None
 使用 xrobot 1.0.1 的 `module` / 有序 `args`；构造函数显式注入外设与服务，实例按依赖顺序创建。参数名和顺序以头文件中的构造函数为准，固件示例见 `User/RobotConfig/`。
 
 保留 PLDX 控制、协议、超时与离线保护。 `OnMonitor()` 由生成的监控循环直接调用。
+
+可选图传遥控：当前两板配置 `cmd: nullptr`。启用 BindCMD 后，接收路径仅缓存键鼠与时间戳，由 CMD 所属任务检查失联并提交独立的 `RC_INPUT_REFEREE` 输入槽，避免覆盖 DR16。停止请求保留至少一周期，长接收间隔先发布离线再恢复；不在 UART 或 OnMonitor 路径访问 CMD。
