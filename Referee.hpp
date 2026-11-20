@@ -2121,42 +2121,15 @@ class Referee {
   }
 
   /* 数据读取 */
-  LibXR::UART* uart_;
-  LibXR::Semaphore sem_;
-  LibXR::ReadOperation op_;
-  LibXR::Semaphore sem_tx_;
-  LibXR::WriteOperation tx_op_;
-  LibXR::Mutex tx_mutex_;
-  LibXR::Mutex tx_data_mutex_;
-  LibXR::Mutex video_link_mutex_;
-  CMD::Data video_link_pending_{};
-  bool video_link_dirty_ = false;
-  bool video_link_gap_pending_ = false;
-  bool video_link_stop_pending_ = false; /* 保护图传键鼠在线状态 */
-  CMD* cmd_;
-  uint8_t tx_buf_[256]{};
-  uint8_t tx_seq_ = 0;
-  uint8_t byte_ = 0;
-
-  /* 协议,数据流 */
-  struct [[gnu::packed]] {
-    Header header_;
-    uint8_t buf_[251]; /* 缓冲区，对齐256 */
-  } pack_;
+  bool referee_online_ = false;
+  bool last_parse_; /* 上一次解包是否成功 */
   Data data_{}; /* 数据包本体 */
-  LibXR::Topic chassispack_topic_;
+
   ChassisPack cp_; /* 发给底盘的数据包缓冲 */
-  LibXR::Topic launcherpack_topic_;
   LauncherPack lp_; /* 发给发射的数据包缓冲 */
-  LibXR::Topic robot_game_referee_topic_;
   RobotGameRefereePack robot_game_referee_pack_; /* 裁判系统摘要包缓冲 */
-  LibXR::Topic radar_pack_topic_;
   RadarPack radar_pack_;
 
-  bool last_parse_; /* 上一次解包是否成功 */
-
-  /* 线程相关 */
-  LibXR::MillisecondTimestamp last_wake_up_; /* ms */
   uint32_t robot_status_received_time_ms_ = 0U;
   uint32_t power_heat_received_time_ms_ = 0U;
   bool robot_status_received_ = false;
@@ -2166,9 +2139,37 @@ class Referee {
   uint16_t source_valid_mask_ = 0U;
   uint32_t sentry_pos_received_time_ms_ = 0U;
   uint32_t robot_hp_received_time_ms_ = 0U;
-  bool referee_online_ = false;
   LibXR::MillisecondTimestamp
       video_link_remote_last_time_{};     /* 图传键鼠最近一次写入 CMD 的时间 */
   bool video_link_remote_online_ = false; /* 图传键鼠在线锁存，超时后清零 */
+  CMD::Data video_link_pending_{};
+  bool video_link_dirty_ = false;
+  bool video_link_gap_pending_ = false;
+  bool video_link_stop_pending_ = false; /* 保护图传键鼠在线状态 */
+
+  /* 协议,数据流 */
+  struct [[gnu::packed]] {
+    Header header_;
+    uint8_t buf_[251]; /* 缓冲区，对齐256 */
+  } pack_;
+  uint8_t tx_buf_[256]{};
+  uint8_t tx_seq_ = 0;
+  uint8_t byte_ = 0;
+
+  LibXR::UART* uart_;
+  LibXR::Semaphore sem_;
+  LibXR::ReadOperation op_;
+  LibXR::Semaphore sem_tx_;
+  LibXR::WriteOperation tx_op_;
+  LibXR::Mutex tx_mutex_;
+  LibXR::Mutex tx_data_mutex_;
+  LibXR::Mutex video_link_mutex_;
+  CMD* cmd_;
+  LibXR::Topic chassispack_topic_;
+  LibXR::Topic launcherpack_topic_;
+  LibXR::Topic robot_game_referee_topic_;
+  LibXR::Topic radar_pack_topic_;
+  /* 线程相关 */
+  LibXR::MillisecondTimestamp last_wake_up_; /* ms */
   LibXR::Thread thread_;
 };
