@@ -18,6 +18,7 @@ depends: []
 === END MANIFEST === */
 // clang-format on
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -1009,6 +1010,24 @@ class Referee {
       SOURCE_ROBOT_STATUS | SOURCE_POWER_HEAT | SOURCE_ROBOT_POS |
       SOURCE_ROBOT_BUFF | SOURCE_ROBOT_DAMAGE | SOURCE_BULLET_REMAIN |
       SOURCE_RFID | SOURCE_SENTRY_POS | SOURCE_SENTRY_INFO;
+  using SourceTimes = std::array<uint32_t, 12>;
+
+  static uint16_t FreshSourceMask(uint16_t valid_mask,
+                                  const SourceTimes& received_ms,
+                                  uint32_t now_ms) {
+    uint16_t fresh = 0U;
+    for (size_t index = 0; index < received_ms.size(); ++index) {
+      const uint16_t bit = static_cast<uint16_t>(1U << index);
+      const uint32_t timeout =
+          (bit & (SOURCE_GAME_STATUS | SOURCE_FIELD_EVENT | SOURCE_ROBOT_POS |
+                  SOURCE_SENTRY_POS | SOURCE_SENTRY_INFO))
+              ? 3000U
+              : 1000U;
+      if ((valid_mask & bit) && now_ms - received_ms[index] <= timeout)
+        fresh |= bit;
+    }
+    return fresh;
+  }
 
   /**
    * @brief 机器人、比赛和发射相关的裁判系统摘要
@@ -1128,6 +1147,7 @@ class Referee {
     {
       LibXR::Mutex::LockGuard lock(tx_data_mutex_);
       payload = this->data_.sentry_dec_data;
+      this->data_.sentry_dec_data.current_state = 0U;
     }
 
     return SendStudentCmd(CMDID::REF_STDNT_CMD_ID_SENTRY_CMD, GetRobotID(),
@@ -1968,7 +1988,9 @@ class Referee {
     this->robot_game_referee_pack_.sentry_pos = this->data_.sentry_pos;
     this->robot_game_referee_pack_.source_command_id = source_command_id_;
     this->robot_game_referee_pack_.source_valid_mask = source_valid_mask_;
-    this->robot_game_referee_pack_.source_fresh_mask = FreshSourceMask();
+    this->robot_game_referee_pack_.source_fresh_mask = FreshSourceMask(
+        source_valid_mask_, source_received_ms_,
+        static_cast<uint32_t>(LibXR::Timebase::GetMilliseconds()));
     this->robot_game_referee_pack_.referee_online = referee_online_;
     this->robot_game_referee_pack_.robot_hp_received_time_ms =
         robot_hp_received_time_ms_;
@@ -2037,31 +2059,14 @@ class Referee {
     source_command_id_ = static_cast<uint16_t>(command_id);
     source_valid_mask_ |= source_mask;
     if (source_mask != 0U) {
-      for (unsigned i = 0; i < 12; ++i) {
-        if (source_mask == (1U << i)) {
-          source_received_ms_[i] =
+      for (size_t index = 0; index < source_received_ms_.size(); ++index) {
+        if (source_mask == (1U << index)) {
+          source_received_ms_[index] =
               static_cast<uint32_t>(LibXR::Timebase::GetMilliseconds());
           break;
         }
       }
     }
-  }
-
-  uint16_t FreshSourceMask() const {
-    const uint32_t now =
-        static_cast<uint32_t>(LibXR::Timebase::GetMilliseconds());
-    uint16_t fresh = 0U;
-    for (unsigned i = 0; i < 12; ++i) {
-      const uint16_t bit = static_cast<uint16_t>(1U << i);
-      const uint32_t timeout =
-          (bit & (SOURCE_GAME_STATUS | SOURCE_FIELD_EVENT | SOURCE_ROBOT_POS |
-                  SOURCE_SENTRY_POS | SOURCE_SENTRY_INFO))
-              ? 3000U
-              : 1000U;
-      if ((source_valid_mask_ & bit) && now - source_received_ms_[i] <= timeout)
-        fresh |= bit;
-    }
-    return fresh;
   }
 
   void PublishRefereeStatusIfChanged(bool online) {
@@ -2135,7 +2140,7 @@ class Referee {
   bool robot_status_received_ = false;
   bool power_heat_received_ = false;
   uint16_t source_command_id_ = 0U;
-  uint32_t source_received_ms_[12]{};
+  SourceTimes source_received_ms_{};
   uint16_t source_valid_mask_ = 0U;
   uint32_t sentry_pos_received_time_ms_ = 0U;
   uint32_t robot_hp_received_time_ms_ = 0U;
