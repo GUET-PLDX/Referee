@@ -600,18 +600,15 @@ class Referee {
    *
    */
   struct [[gnu::packed]] SentryInfo {
-    uint32_t exchanged_bullet_num : 11;  /*允许发弹量*/
-    uint32_t exchanged_bullet_times : 4; /*成功远程兑换允许发弹量的次数*/
-    uint32_t exchanged_blood_times : 4;  /*哨兵机器人成功远程兑换血量的次数*/
-    uint32_t could_risen_free : 1;       /*当前是否可以确认免费复活*/
-    uint32_t could_risen_exchanged : 1;  /*哨兵机器人当前是否可以兑换立即复活*/
-    uint32_t risen_cost : 10; /*哨兵机器人当前若兑换立即复活需要花费的金币数*/
-    uint32_t res1 : 1;        /*保留位*/
+    uint32_t info_1;
+    uint16_t info_2;
+    uint64_t info_3;
 
-    uint32_t current_state : 2;  /*哨兵当前姿态*/
-    uint32_t own_mech_state : 1; /* 己方能量机关是否能进入正在激活状态 */
-    uint32_t res2 : 1;           /*保留位*/
+    uint8_t CurrentStance() const {
+      return static_cast<uint8_t>((info_2 >> 12U) & 0x03U);
+    }
   };
+  static_assert(sizeof(SentryInfo) == 14U);
 
   /**
    * @brief 0x020E 雷达自主决策相关信息同步, 1Hz
@@ -874,10 +871,11 @@ class Referee {
     uint32_t buy_bullet_num : 11;         /* 哨兵将要兑换的发弹量值 */
     uint32_t remote_buy_bullet_times : 4; /* 哨兵远程兑换发弹量的请求次数 */
     uint32_t romote_buy_hp_times : 4;     /* 哨兵远程兑换血量的请求次数 */
-    uint32_t current_state : 2; /* 哨兵修改当前姿态指令,1进攻 2防御 3移动 */
+    uint32_t current_state : 3; /* 哨兵修改当前姿态指令,1进攻 2防御 3移动 */
     uint32_t comfirm_mech : 1;  /*哨兵机器人是否确认使能量机关进入正在激活状态*/
-    uint32_t res : 8;           /* 保留位 */
+    uint32_t res : 7;           /* 保留位 */
   };
+  static_assert(sizeof(SentryDecisionData) == 4U);
 
   /**
    * @brief 0x0121 雷达自主决策指令
@@ -1721,7 +1719,8 @@ class Referee {
 
       case CommandID::REF_CMD_ID_SENTRY_DECISION: {
         /* 0x020D, 哨兵自主决策相关信息同步 */
-        if (!COPY_PAYLOAD(this->data_.sentry_decision)) {
+        if (PAYLOAD_LEN != sizeof(SentryInfo) ||
+            !COPY_PAYLOAD(this->data_.sentry_decision)) {
           return false;
         }
         break;
