@@ -13,12 +13,13 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: RoboMaster 2026 referee protocol V2.0.0 parser
+module_description: RoboMaster 2027 referee protocol V1.0.0 parser
 depends: []
 === END MANIFEST === */
 // clang-format on
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -32,6 +33,7 @@ depends: []
 #include "libxr_type.hpp"
 #include "message.hpp"
 #include "mutex.hpp"
+#include "queue/mpmc_queue.hpp"
 #include "semaphore.hpp"
 #include "thread.hpp"
 #include "timebase.hpp"
@@ -45,7 +47,7 @@ depends: []
  */
 class Referee {
  public:
-  static constexpr uint32_t REFEREE_RX_TIMEOUT_MS = 50;
+  static constexpr uint32_t REFEREE_RX_TIMEOUT_MS = 10;
   static constexpr uint32_t MAX_BUY_BULLET_NUM = (1U << 11U) - 1U;
   static constexpr uint32_t MAX_REMOTE_BUY_BULLET_TIMES = (1U << 4U) - 1U;
 
@@ -63,8 +65,8 @@ class Referee {
     REF_BOT_RED_SENTRY = 7,
     REF_BOT_RED_DART = 8,
     REF_BOT_RED_RADAR = 9,
-    REF_BOT_RED_OUTPOST = 10,
-    REF_BOT_RED_BASE = 11,
+    REF_BOT_RED_OUTPOST = 11,
+    REF_BOT_RED_BASE = 10,
     REF_BOT_BLU_HERO = 101,
     REF_BOT_BLU_ENGINEER = 102,
     REF_BOT_BLU_INFANTRY_1 = 103,
@@ -74,8 +76,8 @@ class Referee {
     REF_BOT_BLU_SENTRY = 107,
     REF_BOT_BLU_DART = 108,
     REF_BOT_BLU_RADAR = 109,
-    REF_BOT_BLU_OUTPOST = 110,
-    REF_BOT_BLU_BASE = 111,
+    REF_BOT_BLU_OUTPOST = 111,
+    REF_BOT_BLU_BASE = 110,
   };
 
   enum class ClientID : uint16_t {
@@ -99,15 +101,15 @@ class Referee {
    *
    */
   enum class CMDID : uint16_t {
-    REF_STDNT_CMD_ID_UI_DEL = 0x0100,         /*选手端删除图层*/
-    REF_STDNT_CMD_ID_UI_DRAW1 = 0x0101,       /*选手端绘制一个图形*/
-    REF_STDNT_CMD_ID_UI_DRAW2 = 0x0102,       /*选手端绘制两个图形*/
-    REF_STDNT_CMD_ID_UI_DRAW5 = 0x0103,       /*选手端绘制五个图形*/
-    REF_STDNT_CMD_ID_UI_DRAW7 = 0x0104,       /*选手端绘制七个图形*/
-    REF_STDNT_CMD_ID_UI_STR = 0x0110,         /*选手端绘制字符图形*/
-    REF_STDNT_CMD_ID_CUSTOM = 0x0200,         /*0x0200~0x02FF机器人之间通信*/
-    REF_STDNT_CMD_ID_SENTRY_CMD = 0X0120,     /*哨兵自主决策指令*/
-    REF_STDNT_CMD_ID_RADAR_CMD = 0X0121,      /*雷达自主决策指令*/
+    REF_STDNT_CMD_ID_UI_DEL = 0x0100,     /*选手端删除图层*/
+    REF_STDNT_CMD_ID_UI_DRAW1 = 0x0101,   /*选手端绘制一个图形*/
+    REF_STDNT_CMD_ID_UI_DRAW2 = 0x0102,   /*选手端绘制两个图形*/
+    REF_STDNT_CMD_ID_UI_DRAW5 = 0x0103,   /*选手端绘制五个图形*/
+    REF_STDNT_CMD_ID_UI_DRAW7 = 0x0104,   /*选手端绘制七个图形*/
+    REF_STDNT_CMD_ID_UI_STR = 0x0110,     /*选手端绘制字符图形*/
+    REF_STDNT_CMD_ID_CUSTOM = 0x0200,     /*0x0200~0x02FF机器人之间通信*/
+    REF_STDNT_CMD_ID_SENTRY_CMD = 0X0120, /*哨兵自主决策指令*/
+    REF_STDNT_CMD_ID_RADAR_CMD = 0X0121,  /*雷达自主决策指令*/
     REF_STDNT_CMD_ID_SEND_RADAR_DATA = 0X0279 /*发送给雷达位置数据*/
   };
 
@@ -125,33 +127,33 @@ class Referee {
    *
    */
   enum class CommandID : uint16_t {
-    REF_CMD_ID_GAME_STATUS = 0x0001,   /* 比赛状态数据，固定以 1Hz 频率发送 */
-    REF_CMD_ID_GAME_RESULT = 0x0002,   /* 比赛结果数据，比赛结束触发发送 */
+    REF_CMD_ID_GAME_STATUS = 0x0001, /* 比赛状态数据，固定以 1Hz 频率发送 */
+    REF_CMD_ID_GAME_RESULT = 0x0002, /* 比赛结果数据，比赛结束触发发送 */
     REF_CMD_ID_GAME_ROBOT_HP = 0x0003, /* 机器人血量数据，固定以 3Hz 频率发送 */
-    REF_CMD_ID_FIELD_EVENTS = 0x0101,  /* 场地事件数据，固定以 1Hz 频率发送 */
-    REF_CMD_ID_WARNING = 0x0104,       /* 裁判警告数据，1Hz，触发时发送 */
-    REF_CMD_ID_DART_COUNTDOWN = 0x0105,   /* 飞镖发射相关数据，固定1Hz发送 */
-    REF_CMD_ID_ROBOT_STATUS = 0x0201,     /* 机器人性能体系数据，10Hz */
-    REF_CMD_ID_POWER_HEAT_DATA = 0x0202,  /* 实时底盘缓冲能量和射击热量, 10Hz */
-    REF_CMD_ID_ROBOT_POS = 0x0203,        /* 机器人位置数据, 1Hz */
-    REF_CMD_ID_ROBOT_BUFF = 0x0204,       /* 机器人增益和底盘能量数据, 3Hz */
-    REF_CMD_ID_DRONE_ENERGY = 0x0205,     /* 老💡的宝贝，不知道是啥 */
-    REF_CMD_ID_ROBOT_DMG = 0x0206,        /* 伤害状态数据，伤害发生后发送 */
-    REF_CMD_ID_LAUNCHER_DATA = 0x0207,    /* 实时射击数据，弹丸发射后发送 */
+    REF_CMD_ID_FIELD_EVENTS = 0x0101, /* 场地事件数据，固定以 1Hz 频率发送 */
+    REF_CMD_ID_WARNING = 0x0104, /* 裁判警告数据，1Hz，触发时发送 */
+    REF_CMD_ID_DART_COUNTDOWN = 0x0105, /* 飞镖发射相关数据，固定1Hz发送 */
+    REF_CMD_ID_ROBOT_STATUS = 0x0201, /* 机器人性能体系数据，10Hz */
+    REF_CMD_ID_POWER_HEAT_DATA = 0x0202, /* 实时底盘缓冲能量和射击热量, 10Hz */
+    REF_CMD_ID_ROBOT_POS = 0x0203, /* 机器人位置数据, 1Hz */
+    REF_CMD_ID_ROBOT_BUFF = 0x0204, /* 机器人增益和底盘能量数据, 3Hz */
+    REF_CMD_ID_DRONE_ENERGY = 0x0205, /* 老💡的宝贝，不知道是啥 */
+    REF_CMD_ID_ROBOT_DMG = 0x0206, /* 伤害状态数据，伤害发生后发送 */
+    REF_CMD_ID_LAUNCHER_DATA = 0x0207, /* 实时射击数据，弹丸发射后发送 */
     REF_CMD_ID_BULLET_REMAINING = 0x0208, /* 允许发弹量, 10Hz */
     REF_CMD_ID_RFID = 0x0209,             /* 机器人RFID模块状态, 3Hz */
     REF_CMD_ID_DART_CLIENT = 0x020A,      /* 飞镖选手端指令数据, 3Hz */
     REF_CMD_ID_ROBOT_POS_TO_SENTRY = 0X020B, /* 地面机器人位置数据, 1Hz */
     REF_CMD_ID_RADAR_MARK = 0X020C,          /* 雷达标记进度数据, 1Hz */
-    REF_CMD_ID_SENTRY_DECISION = 0x020D,     /* 哨兵自主决策相关信息同步, 1Hz */
-    REF_CMD_ID_RADAR_DECISION = 0x020E,      /* 雷达自主决策相关信息同步, 1Hz */
-    REF_CMD_ID_INTER_STUDENT = 0x0301,       /* 机器人交互数据, 30Hz */
+    REF_CMD_ID_SENTRY_DECISION = 0x020D, /* 哨兵自主决策相关信息同步, 1Hz */
+    REF_CMD_ID_RADAR_DECISION = 0x020E, /* 雷达自主决策相关信息同步, 1Hz */
+    REF_CMD_ID_INTER_STUDENT = 0x0301, /* 机器人交互数据, 30Hz */
     REF_CMD_ID_INTER_STUDENT_CUSTOM = 0x0302, /*自定义控制器和机器人,30Hz,图传*/
-    REF_CMD_ID_CLIENT_MAP = 0x0303,     /* 选手端小地图交互数据, 选手触发发送 */
+    REF_CMD_ID_CLIENT_MAP = 0x0303, /* 选手端小地图交互数据, 选手触发发送 */
     REF_CMD_ID_KEYBOARD_MOUSE = 0x0304, /* 键鼠遥控数据， 30Hz, 图传链路 */
     REF_CMD_ID_MAP_ROBOT_DATA = 0x0305, /* 小地图接收雷达数据, 5HzMax */
     REF_CMD_ID_CUSTOM_KEYBOARD_MOUSE = 0X0306, /* 自定义控制器交互, 30Hz */
-    REF_CMD_ID_SENTRY_POS_DATA = 0x0307,       /* 小地图接收路径数据, 1Hz */
+    REF_CMD_ID_SENTRY_POS_DATA = 0x0307, /* 小地图接收路径数据, 1Hz */
     REF_CMD_ID_ROBOT_POS_DATA = 0x0308, /* 选手端小地图接受机器人消息, 3Hz */
 
     REF_CMD_ID_CUSTOM_RECV_DATA = 0x0309, /* 自定义控制器收包,10Hz,图传链路 */
@@ -161,11 +163,11 @@ class Referee {
     REF_CMD_ID_GET_VIDEO_TRANS_CH = 0x0F02, /* 查询当前出图信道,应答,图传链路 */
 
     REF_CMD_ID_RADAR_ENEMY_POS = 0x0A01, /*对方机器人的位置坐标,10Hz,雷达链路*/
-    REF_CMD_ID_RADAR_ENEMY_HP = 0x0A02,  /*对方机器人的血量信息,10Hz,雷达链路*/
+    REF_CMD_ID_RADAR_ENEMY_HP = 0x0A02, /*对方机器人的血量信息,10Hz,雷达链路*/
     REF_CMD_ID_RADAR_ENEMY_BULLET = 0x0A03, /* 对方剩余发弹量,10Hz,雷达链路 */
-    REF_CMD_ID_RADAR_ENEMY_INFO = 0x0A04,   /*对方宏观状态信息,10Hz,雷达链路*/
-    REF_CMD_ID_RADAR_ENEMY_BUFF = 0x0A05,   /*对方增益效果,10Hz,雷达链路*/
-    REF_CMD_ID_RADAR_ENEMY_KEY = 0x0A06,    /*对方干扰波密钥,10Hz,雷达链路*/
+    REF_CMD_ID_RADAR_ENEMY_INFO = 0x0A04, /*对方宏观状态信息,10Hz,雷达链路*/
+    REF_CMD_ID_RADAR_ENEMY_BUFF = 0x0A05, /*对方增益效果,10Hz,雷达链路*/
+    REF_CMD_ID_RADAR_ENEMY_KEY = 0x0A06, /*对方干扰波密钥,10Hz,雷达链路*/
 
   };
 
@@ -384,15 +386,17 @@ class Referee {
    */
   struct [[gnu::packed]] RobotHP {
     uint16_t ally_1_robot_hp;  /* 己方1号英雄 */
-    uint16_t ally_2_robot_hp;  /* 己方2号工程 */
+    uint16_t reserved;         /* 2027 保留位 */
     uint16_t ally_3_robot_hp;  /* 己方3号步兵 */
     uint16_t ally_4_robot_hp;  /* 己方4号步兵 */
     int16_t damage_difference; /* 己方与对方全队总伤害之差 */
     uint16_t ally_7_robot_hp;  /* 己方7号哨兵 */
-    uint16_t ally_outpost_hp;  /* 己方前哨站 */
+    uint16_t r_outpost_hp;     /* R 前哨站，固定颜色 */
     uint16_t ally_base_hp;     /* 己方基地 */
-    uint16_t enemy_outpost_hp; /* 对方前哨站 */
+    uint16_t b_outpost_hp;     /* B 前哨站，固定颜色 */
     uint16_t enemy_base_hp;    /* 对方基地 */
+    uint16_t ally_control_degree;
+    uint16_t enemy_control_degree;
   };
 
   /**
@@ -400,20 +404,8 @@ class Referee {
    *
    */
   struct [[gnu::packed]] FieldEvents {
-    uint32_t supply_outter_status : 1; /*bit0己方与资源区不重叠的补给区占领*/
-    uint32_t supply_inner_status : 1;  /*bit1己方与资源区重叠的补给区占领状态*/
-    uint32_t supply_status_RMUL : 1;   /*bit2己方补给区的占领状态，仅UL*/
-    uint32_t energy_mech_small_status : 2; /*bit3-4己方小能量机关的激活状态*/
-    uint32_t energy_mech_big_status : 2;   /*bit5-6己方大能量机关的激活状态*/
-    uint32_t highland_center : 2;          /*bit7-8己方中央高地的占领状态*/
-    uint32_t highland_trapezium : 2;       /*bit9-10己方梯形高地的占领状态*/
-    uint32_t enemy_last_hit_time : 9;    /*bit11-19对方飞镖最后一次击中的时间*/
-    uint32_t enemy_last_hit_target : 3;  /*bit20-22对方飞镖最后击中的具体目标*/
-    uint32_t highland_center_status : 2; /*bit23-24中心增益点的占领状态*/
-    uint32_t fortress_state : 2;         /* bit25-26己方堡垒增益点的占领状态 */
-    uint32_t outpose_state : 2; /* bit27-28己方前哨站增益点的占领状态 */
-    uint32_t base_state : 1;    /* bit29己方基地增益点的占领状态 */
-    uint32_t res : 1;           /* 保留位 */
+    uint32_t event_data;   /* 表 1-9 第一状态字，bit0-31 */
+    uint32_t event_data_2; /* 表 1-9 第二状态字，bit32-63 */
   };
 
   /**
@@ -424,7 +416,7 @@ class Referee {
   struct [[gnu::packed]] Warning {
     uint8_t level;    /* 己方最后一次受到判罚的等级 */
     uint8_t robot_id; /*己方最后一次受到判罚的违规机器人ID*/
-    uint8_t count;    /*己方最后一次受到判罚的违规机器人对应判罚等级的违规次数*/
+    uint8_t count; /*己方最后一次受到判罚的违规机器人对应判罚等级的违规次数*/
   };
 
   /**
@@ -435,9 +427,9 @@ class Referee {
     uint8_t countdown; /*己方飞镖发射剩余时间，单位：秒*/
 
     uint16_t dart_last_target : 3; /*bit0-2最近一次己方飞镖击中的目标*/
-    uint16_t attack_count : 3;     /*bit3-5对方最近被击中的目标累计被击中次数*/
-    uint16_t dart_target : 2;      /*bit6-7飞镖此时选定的击打目标*/
-    uint16_t res : 8;              /* bit8-15保留位 */
+    uint16_t attack_count : 3; /*bit3-5对方最近被击中的目标累计被击中次数*/
+    uint16_t dart_target : 2; /*bit6-7飞镖此时选定的击打目标*/
+    uint16_t res : 8;         /* bit8-15保留位 */
   };
 
   /**
@@ -445,16 +437,16 @@ class Referee {
    *
    */
   struct [[gnu::packed]] RobotStatus {
-    uint8_t robot_id;                  /* 本机器人 ID */
-    uint8_t robot_level;               /* 机器人等级 */
-    uint16_t remain_hp;                /* 机器人当前血量 */
-    uint16_t max_hp;                   /* 机器人血量上限 */
-    uint16_t shooter_cooling_value;    /* 机器人射击热量每秒冷却值 */
-    uint16_t shooter_heat_limit;       /* 机器人射击热量上限 */
-    uint16_t chassis_power_limit;      /* 机器人底盘功率上限 */
-    float bullet_speed_limit;          /* 机器人射击初速度上限 */
-    uint8_t power_gimbal_output : 1;   /* gimbal输出，0为无输出，1为24V输出 */
-    uint8_t power_chassis_output : 1;  /* chassis输出，0为无输出，1为24V输出*/
+    uint8_t robot_id;               /* 本机器人 ID */
+    uint8_t robot_level;            /* 机器人等级 */
+    uint16_t remain_hp;             /* 机器人当前血量 */
+    uint16_t max_hp;                /* 机器人血量上限 */
+    uint16_t shooter_cooling_value; /* 机器人射击热量每秒冷却值 */
+    uint16_t shooter_heat_limit;    /* 机器人射击热量上限 */
+    uint16_t chassis_power_limit;   /* 机器人底盘功率上限 */
+    float bullet_speed_limit;       /* 机器人射击初速度上限 */
+    uint8_t power_gimbal_output : 1; /* gimbal输出，0为无输出，1为24V输出 */
+    uint8_t power_chassis_output : 1; /* chassis输出，0为无输出，1为24V输出*/
     uint8_t power_launcher_output : 1; /* shooter输出，0为无输出，1为24V 输出 */
   };
 
@@ -486,18 +478,11 @@ class Referee {
    *
    */
   struct [[gnu::packed]] RobotBuff {
-    uint8_t healing_buff;       /*机器人回血增益,百分比*/
-    uint16_t cooling_acc;       /*机器人射击热量冷却增益 单位是s^{-1}*/
-    uint8_t defense_buff;       /*机器人防御增益 百分比*/
+    uint8_t healing_buff; /*机器人回血增益,百分比*/
+    uint16_t cooling_acc; /*机器人射击热量冷却增益 单位是s^{-1}*/
+    uint8_t defense_buff; /*机器人防御增益 百分比*/
     uint8_t vulnerability_buff; /*机器人负防御增益 百分比*/
     uint16_t attack_buff;       /*机器人攻击增益 百分比*/
-    uint8_t percent_125_remain_energy : 1; /* 在剩余能量≥125%时为 1 */
-    uint8_t percent_100_remain_energy : 1; /* 在剩余能量≥100%时为 1 */
-    uint8_t percent_50_remain_energy : 1;  /* 在剩余能量≥50%时为 1 */
-    uint8_t percent_30_remain_energy : 1;  /* 在剩余能量≥30%时为 1 */
-    uint8_t percent_15_remain_energy : 1;  /* 在剩余能量≥15%时为 1 */
-    uint8_t percent_5_remain_energy : 1;   /* 在剩余能量≥5%时为 1 */
-    uint8_t percent_1_remain_energy : 1;   /* 在剩余能量≥1%时为 1 */
   };
 
   /**
@@ -507,6 +492,9 @@ class Referee {
   struct [[gnu::packed]] RobotDamage {
     uint8_t armor_id : 4;    /* 受击打的装甲板id */
     uint8_t damage_type : 4; /* 血量变化类型 */
+    uint16_t hit_sequence;
+    int16_t hit_x;
+    int16_t hit_y;
   };
 
   /**
@@ -528,7 +516,7 @@ class Referee {
     uint16_t bullet_17_remain; /*  17mm 弹丸允许发弹量 */
     uint16_t bullet_42_remain; /*  42mm 弹丸允许发弹量 */
     uint16_t coin_remain;      /* 剩余金币数量 */
-    uint16_t bullet_17_store;  /* 堡垒增益点提供的储备 17mm 弹丸允许发弹量 */
+    uint16_t bullet_17_store; /* 堡垒增益点提供的储备 17mm 弹丸允许发弹量 */
   };
 
   /**
@@ -536,19 +524,19 @@ class Referee {
    *
    */
   struct [[gnu::packed]] RFID {
-    uint32_t rfid_status;  /* bit 0-31 */
-    uint8_t rfid_status_2; /* bit 32-37，bit 38-39 保留 */
+    uint32_t rfid_status;   /* bit 0-31 */
+    uint16_t rfid_status_2; /* 表1-19 第二状态字，bit8 为隧道 RFID */
   };
 
   static_assert(sizeof(GameStatus) == 11, "0x0001 size mismatch");
-  static_assert(sizeof(RobotHP) == 20, "0x0003 size mismatch");
-  static_assert(sizeof(FieldEvents) == 4, "0x0101 size mismatch");
+  static_assert(sizeof(RobotHP) == 24, "0x0003 size mismatch");
+  static_assert(sizeof(FieldEvents) == 8, "0x0101 size mismatch");
   static_assert(sizeof(RobotStatus) == 17, "0x0201 size mismatch");
   static_assert(sizeof(PowerHeat) == 14, "0x0202 size mismatch");
-  static_assert(sizeof(RobotBuff) == 8, "0x0204 size mismatch");
-  static_assert(sizeof(RobotDamage) == 1, "0x0206 size mismatch");
+  static_assert(sizeof(RobotBuff) == 7, "0x0204 size mismatch");
+  static_assert(sizeof(RobotDamage) == 7, "0x0206 size mismatch");
   static_assert(sizeof(BulletRemain) == 8, "0x0208 size mismatch");
-  static_assert(sizeof(RFID) == 5, "0x0209 size mismatch");
+  static_assert(sizeof(RFID) == 6, "0x0209 size mismatch");
 
   /**
    * @brief 0x020A 飞镖选手端指令数据, 3Hz
@@ -558,7 +546,7 @@ class Referee {
     uint8_t opening_status;              /*当前飞镖发射站的状态*/
     uint8_t res;                         /*保留位*/
     uint16_t target_changable_countdown; /*切换目标时比赛剩余时间，单位秒*/
-    uint16_t operator_cmd_launch_time;   /*最后一次确定发射时的剩余时间，单位s*/
+    uint16_t operator_cmd_launch_time; /*最后一次确定发射时的剩余时间，单位s*/
   };
 
   /**
@@ -566,10 +554,10 @@ class Referee {
    *
    */
   struct [[gnu::packed]] RobotPosForSentry {
-    float hero_x;       /*己方英雄机器人位置 x 轴坐标，单位：m*/
-    float hero_y;       /*己方英雄机器人位置 y 轴坐标，单位：m*/
-    float engineer_x;   /*己方工程机器人位置 x 轴坐标，单位：m*/
-    float engineer_y;   /*己方工程机器人位置 y 轴坐标，单位：m*/
+    float hero_x; /*己方英雄机器人位置 x 轴坐标，单位：m*/
+    float hero_y; /*己方英雄机器人位置 y 轴坐标，单位：m*/
+    float reserved_engineer_x; /*己方工程机器人位置 x 轴坐标，单位：m*/
+    float reserved_engineer_y; /*己方工程机器人位置 y 轴坐标，单位：m*/
     float standard_3_x; /*己方 3 号步兵机器人位置 x 轴坐标，单位：m*/
     float standard_3_y; /*己方 3 号步兵机器人位置 y 轴坐标，单位：m*/
     float standard_4_x; /*己方 4 号步兵机器人位置 x 轴坐标，单位：m*/
@@ -583,16 +571,7 @@ class Referee {
    *
    */
   struct [[gnu::packed]] RadarMarkProgress {
-    uint8_t mark_enemy_hero_state : 1;       /*对方 1 号英雄机器人易伤情况*/
-    uint8_t mark_enemy_engineer_state : 1;   /*对方 2 号工程机器人易伤情况*/
-    uint8_t mark_enemy_standard_3_state : 1; /*对方 3 号步兵机器人易伤情况*/
-    uint8_t mark_enemy_standard_4_state : 1; /*对方 4 号步兵机器人易伤情况*/
-    uint8_t mark_enemy_sentry_state : 1;     /*对方哨兵机器人易伤情况*/
-    uint8_t mark_own_hero_state : 1;         /*己方 1 号英雄机器人特殊标识情况*/
-    uint8_t mark_own_engineer_state : 1;     /*己方 2 号工程机器人特殊标识情况*/
-    uint8_t mark_own_standard_3_state : 1;   /*己方 3 号步兵机器人特殊标识情况*/
-    uint8_t mark_own_standard_4_state : 1;   /*己方 4 号步兵机器人特殊标识情况*/
-    uint8_t mark_own_sentry_state : 1;       /*己方哨兵机器人特殊标识情况*/
+    uint16_t mark_progress;
   };
 
   /**
@@ -615,11 +594,15 @@ class Referee {
    *
    */
   struct [[gnu::packed]] RadarInfo {
-    uint8_t qualification : 2;      /*雷达是否拥有触发双倍易伤的机会*/
-    uint8_t enemy_status : 1;       /*对方是否正在被触发双倍易伤*/
-    uint8_t encript_level : 2;      /*己方加密等级（即对方干扰波难度等级）*/
+    uint8_t qualification : 2; /*雷达是否拥有触发双倍易伤的机会*/
+    uint8_t enemy_status : 1;  /*对方是否正在被触发双倍易伤*/
+    uint8_t encript_level : 2; /*己方加密等级（即对方干扰波难度等级）*/
     uint8_t could_exchange_key : 1; /*当前是否可以修改密钥*/
     uint8_t res : 2;                /*保留位*/
+    uint8_t fortify_info;
+    uint16_t fortify_center_x;
+    uint16_t fortify_center_y;
+    uint16_t fortify_radius;
   };
 
   /**
@@ -627,8 +610,8 @@ class Referee {
    *
    */
   struct [[gnu::packed]] RobotInteractionData {
-    CMDID data_cmd_id;     /* 子内容ID,需为开放的子内容 ID */
-    uint16_t sender_id;    /*发送者 ID,需与自身 ID 匹配，ID 编号详见附录*/
+    CMDID data_cmd_id; /* 子内容ID,需为开放的子内容 ID */
+    uint16_t sender_id; /*发送者 ID,需与自身 ID 匹配，ID 编号详见附录*/
     uint16_t receiver_id;  /*接收者 ID*/
     int8_t user_data[112]; /*内容数据段*/
   };
@@ -651,7 +634,7 @@ class Referee {
     float position_y;       /*目标位置 y 轴坐标，单位 m*/
     uint8_t commd_keyboard; /*云台手按下的键盘按键通用键值*/
     uint8_t robot_id;       /*对方机器人 ID*/
-    uint8_t cmd_source;     /*信息来源 ID*/
+    uint16_t cmd_source;    /*信息来源 ID*/
   };
 
   /**
@@ -660,11 +643,11 @@ class Referee {
    *
    */
   struct [[gnu::packed]] KeyboardMouse {
-    int16_t mouse_x;         /*鼠标 x 轴移动速度，负值标识向左移动*/
-    int16_t mouse_y;         /*鼠标 y 轴移动速度，负值标识向下移动*/
-    int16_t mouse_wheel;     /*鼠标滚轮移动速度，负值标识向后滚动*/
-    int8_t button_l;         /*鼠标左键是否按下：0 为未按下；1 为按下*/
-    int8_t button_r;         /*鼠标右键是否按下：0 为未按下，1 为按下*/
+    int16_t mouse_x;     /*鼠标 x 轴移动速度，负值标识向左移动*/
+    int16_t mouse_y;     /*鼠标 y 轴移动速度，负值标识向下移动*/
+    int16_t mouse_wheel; /*鼠标滚轮移动速度，负值标识向后滚动*/
+    int8_t button_l; /*鼠标左键是否按下：0 为未按下；1 为按下*/
+    int8_t button_r; /*鼠标右键是否按下：0 为未按下，1 为按下*/
     uint16_t keyboard_value; /* 键盘按键信息 @enum KeyBoard */
     uint16_t res;            /*保留位*/
   };
@@ -674,18 +657,18 @@ class Referee {
    *
    */
   struct [[gnu::packed]] MapRobotData {
-    uint16_t hero_x;       /*英雄机器人 x 位置坐标，单位：cm*/
-    uint16_t hero_y;       /*英雄机器人 y 位置坐标，单位：cm*/
-    uint16_t engineer_x;   /*工程机器人 x 位置坐标，单位：cm*/
-    uint16_t engineer_y;   /*工程机器人 y 位置坐标，单位：cm*/
-    uint16_t infantry_3_x; /*3 号步兵 x 位置坐标，单位：cm*/
-    uint16_t infantry_3_y; /*3 号步兵 y 位置坐标，单位：cm*/
-    uint16_t infantry_4_x; /*4 号步兵 x 位置坐标，单位：cm*/
-    uint16_t infantry_4_y; /*4 号步兵 y 位置坐标，单位：cm*/
-    uint16_t infantry_5_x; /*5 号步兵 x 位置坐标，单位：cm*/
-    uint16_t infantry_5_y; /*5 号步兵 y 位置坐标，单位：cm*/
-    uint16_t sentry_x;     /*哨兵机器人 x 位置坐标，单位：cm*/
-    uint16_t sentry_y;     /*哨兵机器人 y 位置坐标，单位：cm*/
+    uint16_t enemy_hero_x, enemy_hero_y;
+    uint16_t reserved_enemy_2_x, reserved_enemy_2_y;
+    uint16_t enemy_infantry_3_x, enemy_infantry_3_y;
+    uint16_t enemy_infantry_4_x, enemy_infantry_4_y;
+    uint16_t reserved_enemy_5_x, reserved_enemy_5_y;
+    uint16_t enemy_sentry_x, enemy_sentry_y;
+    uint16_t ally_hero_x, ally_hero_y;
+    uint16_t reserved_ally_2_x, reserved_ally_2_y;
+    uint16_t ally_infantry_3_x, ally_infantry_3_y;
+    uint16_t ally_infantry_4_x, ally_infantry_4_y;
+    uint16_t reserved_ally_5_x, reserved_ally_5_y;
+    uint16_t ally_sentry_x, ally_sentry_y;
   };
 
   /**
@@ -711,7 +694,7 @@ class Referee {
    *       数据，该路径会在小地图上显示
    */
   struct [[gnu::packed]] SentryPosition {
-    uint8_t intention;         /*移动到目标点或者到目标点攻击/防守*/
+    uint8_t intention; /*移动到目标点或者到目标点攻击/防守*/
     uint16_t start_position_x; /*路径起点 x 轴坐标，单位：dm*/
     uint16_t start_position_y; /*路径起点 y 轴坐标，单位：dm*/
     int8_t delta_x[49];        /*路径点 x 轴增量数组，单位：dm*/
@@ -747,7 +730,7 @@ class Referee {
    *
    */
   struct [[gnu::packed]] CustomData2 {
-    uint8_t data[150]; /*自定义数据*/
+    uint8_t data[300]; /*表1-39完整自定义数据*/
   };
 
   /**
@@ -755,18 +738,18 @@ class Referee {
    *
    */
   struct [[gnu::packed]] RadarEnemyRobotPos {
-    uint16_t enemy_hero_x;       /*对方英雄机器人 x 位置坐标，单位：cm*/
-    uint16_t enemy_hero_y;       /*对方英雄机器人 y 位置坐标，单位：cm*/
-    uint16_t enemy_engineer_x;   /*对方工程机器人 x 位置坐标，单位：cm*/
-    uint16_t enemy_engineer_y;   /*对方工程机器人 y 位置坐标，单位：cm*/
+    uint16_t enemy_hero_x; /*对方英雄机器人 x 位置坐标，单位：cm*/
+    uint16_t enemy_hero_y; /*对方英雄机器人 y 位置坐标，单位：cm*/
+    uint16_t reserved_engineer_x; /*对方工程机器人 x 位置坐标，单位：cm*/
+    uint16_t reserved_engineer_y; /*对方工程机器人 y 位置坐标，单位：cm*/
     uint16_t enemy_infantry_3_x; /*对方3 号步兵 x 位置坐标，单位：cm*/
     uint16_t enemy_infantry_3_y; /*对方3 号步兵 y 位置坐标，单位：cm*/
     uint16_t enemy_infantry_4_x; /*对方4 号步兵 x 位置坐标，单位：cm*/
     uint16_t enemy_infantry_4_y; /*对方4 号步兵 y 位置坐标，单位：cm*/
-    uint16_t enemy_drone_x;      /*对方空中机器人 x 位置坐标，单位：cm*/
-    uint16_t enemy_drone_y;      /*对方空中机器人 y 位置坐标，单位：cm*/
-    uint16_t enemy_sentry_x;     /*对方哨兵机器人 x 位置坐标，单位：cm*/
-    uint16_t enemy_sentry_y;     /*对方哨兵机器人 y 位置坐标，单位：cm*/
+    uint16_t reserved_drone_x; /*对方空中机器人 x 位置坐标，单位：cm*/
+    uint16_t reserved_drone_y; /*对方空中机器人 y 位置坐标，单位：cm*/
+    uint16_t enemy_sentry_x; /*对方哨兵机器人 x 位置坐标，单位：cm*/
+    uint16_t enemy_sentry_y; /*对方哨兵机器人 y 位置坐标，单位：cm*/
   };
 
   /**
@@ -774,12 +757,12 @@ class Referee {
    *
    */
   struct [[gnu::packed]] RadarEnemyRobotHP {
-    uint16_t enemy_hero_hp;       /*对方 1 号英雄机器人血量*/
-    uint16_t enemy_engineer_hp;   /*对方 2 号工程机器人血量*/
-    uint16_t enemy_infantry_3_hp; /*对方 3 号步兵机器人血量*/
-    uint16_t enemy_infantry_4_hp; /*对方 4 号步兵机器人血量*/
-    uint16_t res;                 /*保留位*/
-    uint16_t enemy_sentry_hp;     /*对方 7 号哨兵机器人血量*/
+    uint16_t enemy_hero_hp;        /*对方 1 号英雄机器人血量*/
+    uint16_t reserved_engineer_hp; /*对方 2 号工程机器人血量*/
+    uint16_t enemy_infantry_3_hp;  /*对方 3 号步兵机器人血量*/
+    uint16_t enemy_infantry_4_hp;  /*对方 4 号步兵机器人血量*/
+    uint16_t res;                  /*保留位*/
+    uint16_t enemy_sentry_hp;      /*对方 7 号哨兵机器人血量*/
   };
 
   /**
@@ -787,12 +770,11 @@ class Referee {
    *
    */
   struct [[gnu::packed]] RadarEnemyBullet {
-    uint16_t enemy_hero_bullet;        /*对方 1 号英雄机器人允许发弹量*/
-    uint16_t enemy_engineer_bullet;    /*对方 2 号工程机器人允许发弹量*/
-    uint16_t enemy_infantry_3_bullet;  /*对方 3 号步兵机器人允许发弹量*/
-    uint16_t enemy_infantry_4_bulletp; /*对方 4 号步兵机器人允许发弹量*/
-    uint16_t enemy_drone_bullet;       /*对方 6 号空中机器人允许发弹量*/
-    uint16_t enemy_sentry_bullet;      /*对方 7 号哨兵机器人允许发弹量*/
+    uint16_t enemy_hero_bullet;
+    uint16_t enemy_infantry_3_bullet;
+    uint16_t enemy_infantry_4_bullet;
+    uint16_t reserved;
+    uint16_t enemy_sentry_bullet;
   };
 
   /**
@@ -800,21 +782,10 @@ class Referee {
    *
    */
   struct [[gnu::packed]] RadarEnemyState {
-    uint16_t enemy_remain_coins;                /*对方剩余金币数*/
-    uint16_t enemy_coins_total;                 /*对方累计总金币数*/
-    uint8_t enemy_support_state : 1;            /*对方补给区占领状态*/
-    uint8_t enemy_center_state : 2;             /*对方中央高地的占领状态*/
-    uint8_t enemy_highland_trapezium_state : 1; /*对方梯形高地的占领状态*/
-    uint8_t enemy_fortress_state : 2;           /*对方堡垒增益点的占领状态*/
-    uint8_t enemy_outpose_state : 2;            /*对方前哨站增益点的占领状态*/
-    uint8_t enemy_base_state : 1;               /*对方基地增益点的占领状态*/
-    uint8_t enemy_tunnel_cross_enemy_f : 1; /*靠近对方飞坡前增益点（隧道）状态*/
-    uint8_t enemy_tunnel_cross_enemy_b : 1; /*靠近对方飞坡后增益点（隧道）状态*/
-    uint8_t enemy_tunnel_cross_own_f : 1;   /*靠近己方飞坡前增益点（隧道）状态*/
-    uint8_t enemy_tunnel_cross_own_b : 1;   /*靠近己方飞坡后增益点（隧道）状态*/
-    uint8_t enemy_highland_up_state : 1;    /*对方（高地）上部场地交互状态*/
-    uint8_t enemy_slope_up_state : 1;       /*对方（飞坡）上部场地交互状态*/
-    uint8_t enemy_cross_up_state : 1;       /*对方（公路）上部场地交互状态*/
+    uint16_t enemy_remain_coins;
+    uint16_t enemy_coins_total;
+    uint32_t activation_status;
+    uint32_t terrain_control_status;
   };
 
   /**
@@ -822,35 +793,40 @@ class Referee {
    *
    */
   struct [[gnu::packed]] RadarRobotBuff {
-    uint8_t enemy_hero_health;     /*对方英雄机器人回血增益, 百分比*/
-    uint16_t enemy_hero_heat;      /* 对方英雄射击热量冷却增益,直接值,单位/s */
+    uint8_t enemy_hero_health; /*对方英雄机器人回血增益, 百分比*/
+    uint16_t enemy_hero_heat; /* 对方英雄射击热量冷却增益,直接值,单位/s */
     uint8_t enemy_hero_protection; /*对方英雄机器人防御增益,百分比*/
     uint8_t enemy_hero_neg_protection; /*对方英雄机器人负防御增益,百分比*/
-    uint16_t enemy_hero_attact;        /*对方英雄机器人攻击增益,百分比*/
+    uint16_t enemy_hero_attact; /*对方英雄机器人攻击增益,百分比*/
 
-    uint8_t enemy_engineer_health; /*对方工程机器人回血增益, 百分比*/
-    uint16_t enemy_engineer_heat;  /* 对方工程射击热量冷却增益,直接值,单位/s */
-    uint8_t enemy_engineer_protection;     /*对方工程机器人防御增益,百分比*/
-    uint8_t enemy_engineer_neg_protection; /*对方工程机器人负防御增益,百分比*/
-    uint16_t enemy_engineer_attact;        /*对方工程机器人攻击增益,百分比*/
+    uint8_t reserved_engineer[7];
 
     uint8_t enemy_infantry_3_health; /*对方3号步兵回血增益, 百分比*/
-    uint16_t enemy_infantry_3_heat;  /* 对方3号射击热量冷却增益,直接值,单位/s */
-    uint8_t enemy_infantry_3_protection;     /*对方3号步兵防御增益,百分比*/
+    uint16_t enemy_infantry_3_heat; /* 对方3号射击热量冷却增益,直接值,单位/s */
+    uint8_t enemy_infantry_3_protection; /*对方3号步兵防御增益,百分比*/
     uint8_t enemy_infantry_3_neg_protection; /*对方3号步兵负防御增益,百分比*/
-    uint16_t enemy_infantry_3_attact;        /*对方3号步兵攻击增益,百分比*/
+    uint16_t enemy_infantry_3_attact; /*对方3号步兵攻击增益,百分比*/
 
     uint8_t enemy_infantry_4_health; /*对方4号步兵回血增益, 百分比*/
-    uint16_t enemy_infantry_4_heat;  /* 对方4号射击热量冷却增益,直接值,单位/s */
-    uint8_t enemy_infantry_4_protection;     /*对方4号步兵防御增益,百分比*/
+    uint16_t enemy_infantry_4_heat; /* 对方4号射击热量冷却增益,直接值,单位/s */
+    uint8_t enemy_infantry_4_protection; /*对方4号步兵防御增益,百分比*/
     uint8_t enemy_infantry_4_neg_protection; /*对方4号步兵负防御增益,百分比*/
-    uint16_t enemy_infantry_4_attact;        /*对方4号步兵攻击增益,百分比*/
+    uint16_t enemy_infantry_4_attact; /*对方4号步兵攻击增益,百分比*/
 
     uint8_t enemy_sentry_health; /*对方哨兵回血增益, 百分比*/
-    uint16_t enemy_sentry_heat;  /* 对方哨兵射击热量冷却增益,直接值,单位/s */
+    uint16_t enemy_sentry_heat; /* 对方哨兵射击热量冷却增益,直接值,单位/s */
     uint8_t enemy_sentry_protection;     /*对方哨兵防御增益,百分比*/
     uint8_t enemy_sentry_neg_protection; /*对方哨兵负防御增益,百分比*/
     uint16_t enemy_sentry_attact;        /*对方哨兵攻击增益,百分比*/
+    uint8_t enemy_sentry_stance;
+    uint8_t enemy_hero_state;
+    uint8_t reserved_state;
+    uint8_t enemy_infantry_3_state;
+    uint8_t enemy_infantry_4_state;
+    uint8_t enemy_sentry_state;
+    uint16_t fortify_center_x;
+    uint16_t fortify_center_y;
+    uint16_t fortify_radius;
   };
 
   /**
@@ -866,14 +842,14 @@ class Referee {
    *
    */
   struct [[gnu::packed]] SentryDecisionData {
-    uint32_t confirm_resurrection : 1;    /* 哨兵机器人是否确认复活 */
-    uint32_t buy_resurrection : 1;        /* 哨兵机器人是否确认兑换立即复活 */
-    uint32_t buy_bullet_num : 11;         /* 哨兵将要兑换的发弹量值 */
+    uint32_t confirm_resurrection : 1; /* 哨兵机器人是否确认复活 */
+    uint32_t buy_resurrection : 1; /* 哨兵机器人是否确认兑换立即复活 */
+    uint32_t buy_bullet_num : 11; /* 哨兵将要兑换的发弹量值 */
     uint32_t remote_buy_bullet_times : 4; /* 哨兵远程兑换发弹量的请求次数 */
-    uint32_t romote_buy_hp_times : 4;     /* 哨兵远程兑换血量的请求次数 */
+    uint32_t romote_buy_hp_times : 4; /* 哨兵远程兑换血量的请求次数 */
     uint32_t current_state : 3; /* 哨兵修改当前姿态指令,1进攻 2防御 3移动 */
-    uint32_t comfirm_mech : 1;  /*哨兵机器人是否确认使能量机关进入正在激活状态*/
-    uint32_t res : 7;           /* 保留位 */
+    uint32_t comfirm_mech : 1; /*哨兵机器人是否确认使能量机关进入正在激活状态*/
+    uint32_t res : 7; /* 保留位 */
   };
   static_assert(sizeof(SentryDecisionData) == 4U);
 
@@ -882,7 +858,7 @@ class Referee {
    *
    */
   struct [[gnu::packed]] RadarDecisionData {
-    uint8_t radar_cmd;    /* 雷达是否确认触发双倍易伤（单调+1） */
+    uint8_t radar_cmd; /* 雷达是否确认触发双倍易伤（单调+1） */
     uint8_t password_cmd; /* byte1：1改密钥；2提交破解密钥验证 */
     uint8_t password_1;
     uint8_t password_2;
@@ -890,7 +866,19 @@ class Referee {
     uint8_t password_4;
     uint8_t password_5;
     uint8_t password_6;
+    uint8_t armor_fortify_cmd;
+    uint16_t fortify_center_x;
+    uint16_t fortify_center_y;
   };
+
+  static_assert(sizeof(RadarInfo) == 8);
+  static_assert(sizeof(RadarDecisionData) == 13);
+  static_assert(sizeof(ClientMap) == 12);
+  static_assert(sizeof(MapRobotData) == 48);
+  static_assert(sizeof(CustomData2) == 300);
+  static_assert(sizeof(RadarEnemyBullet) == 10);
+  static_assert(sizeof(RadarEnemyState) == 12);
+  static_assert(sizeof(RadarRobotBuff) == 47);
 
   /**
    * @brief 0x0F01 设置图传出图信道，应答
@@ -973,8 +961,8 @@ class Referee {
    *
    */
   struct [[gnu::packed]] ChassisPack {
-    RobotStatus rs;                              /* 等级和功率上限 */
-    uint16_t power_buffer;                       /* 底盘缓冲能量，单位 J */
+    RobotStatus rs;        /* 等级和功率上限 */
+    uint16_t power_buffer; /* 底盘缓冲能量，单位 J */
     uint32_t robot_status_received_time_ms = 0U; /* 0x0201 接收时间 */
     bool robot_status_received = false;          /* 已收到有效 0x0201 */
     uint32_t power_heat_received_time_ms = 0U;   /* 0x0202 接收时间 */
@@ -1009,6 +997,155 @@ class Referee {
       SOURCE_ROBOT_BUFF | SOURCE_ROBOT_DAMAGE | SOURCE_BULLET_REMAIN |
       SOURCE_RFID | SOURCE_SENTRY_POS | SOURCE_SENTRY_INFO;
   using SourceTimes = std::array<uint32_t, 12>;
+
+  static uint16_t SourceMaskForCommand(CommandID id) {
+    switch (id) {
+      case CommandID::REF_CMD_ID_GAME_STATUS:
+        return SOURCE_GAME_STATUS;
+      case CommandID::REF_CMD_ID_GAME_ROBOT_HP:
+        return SOURCE_ROBOT_HP;
+      case CommandID::REF_CMD_ID_FIELD_EVENTS:
+        return SOURCE_FIELD_EVENT;
+      case CommandID::REF_CMD_ID_ROBOT_STATUS:
+        return SOURCE_ROBOT_STATUS;
+      case CommandID::REF_CMD_ID_POWER_HEAT_DATA:
+        return SOURCE_POWER_HEAT;
+      case CommandID::REF_CMD_ID_ROBOT_POS:
+        return SOURCE_ROBOT_POS;
+      case CommandID::REF_CMD_ID_ROBOT_POS_TO_SENTRY:
+        return SOURCE_SENTRY_POS;
+      case CommandID::REF_CMD_ID_SENTRY_DECISION:
+        return SOURCE_SENTRY_INFO;
+      case CommandID::REF_CMD_ID_ROBOT_BUFF:
+        return SOURCE_ROBOT_BUFF;
+      case CommandID::REF_CMD_ID_ROBOT_DMG:
+        return SOURCE_ROBOT_DAMAGE;
+      case CommandID::REF_CMD_ID_BULLET_REMAINING:
+        return SOURCE_BULLET_REMAIN;
+      case CommandID::REF_CMD_ID_RFID:
+        return SOURCE_RFID;
+      default:
+        return 0U;
+    }
+  }
+
+  // -1 is the bounded 0x0301 payload, -2 means unsupported/legacy.
+  static int ExpectedPayloadSize(CommandID id) {
+    switch (id) {
+      case CommandID::REF_CMD_ID_GAME_STATUS:
+        return sizeof(GameStatus);
+      case CommandID::REF_CMD_ID_GAME_RESULT:
+        return sizeof(GameResult);
+      case CommandID::REF_CMD_ID_GAME_ROBOT_HP:
+        return sizeof(RobotHP);
+      case CommandID::REF_CMD_ID_FIELD_EVENTS:
+        return sizeof(FieldEvents);
+      case CommandID::REF_CMD_ID_WARNING:
+        return sizeof(Warning);
+      case CommandID::REF_CMD_ID_DART_COUNTDOWN:
+        return sizeof(DartCountdown);
+      case CommandID::REF_CMD_ID_ROBOT_STATUS:
+        return sizeof(RobotStatus);
+      case CommandID::REF_CMD_ID_POWER_HEAT_DATA:
+        return sizeof(PowerHeat);
+      case CommandID::REF_CMD_ID_ROBOT_POS:
+        return sizeof(RobotPOS);
+      case CommandID::REF_CMD_ID_ROBOT_BUFF:
+        return sizeof(RobotBuff);
+      case CommandID::REF_CMD_ID_ROBOT_DMG:
+        return sizeof(RobotDamage);
+      case CommandID::REF_CMD_ID_LAUNCHER_DATA:
+        return sizeof(LauncherData);
+      case CommandID::REF_CMD_ID_BULLET_REMAINING:
+        return sizeof(BulletRemain);
+      case CommandID::REF_CMD_ID_RFID:
+        return sizeof(RFID);
+      case CommandID::REF_CMD_ID_DART_CLIENT:
+        return sizeof(DartClient);
+      case CommandID::REF_CMD_ID_ROBOT_POS_TO_SENTRY:
+        return sizeof(RobotPosForSentry);
+      case CommandID::REF_CMD_ID_RADAR_MARK:
+        return sizeof(RadarMarkProgress);
+      case CommandID::REF_CMD_ID_SENTRY_DECISION:
+        return sizeof(SentryInfo);
+      case CommandID::REF_CMD_ID_RADAR_DECISION:
+        return sizeof(RadarInfo);
+      case CommandID::REF_CMD_ID_INTER_STUDENT_CUSTOM:
+        return sizeof(CustomController);
+      case CommandID::REF_CMD_ID_CLIENT_MAP:
+        return sizeof(ClientMap);
+      case CommandID::REF_CMD_ID_KEYBOARD_MOUSE:
+        return sizeof(KeyboardMouse);
+      case CommandID::REF_CMD_ID_MAP_ROBOT_DATA:
+        return sizeof(MapRobotData);
+      case CommandID::REF_CMD_ID_CUSTOM_KEYBOARD_MOUSE:
+        return sizeof(CustomKeyMouseData);
+      case CommandID::REF_CMD_ID_SENTRY_POS_DATA:
+        return sizeof(SentryPosition);
+      case CommandID::REF_CMD_ID_ROBOT_POS_DATA:
+        return sizeof(RobotPosition);
+      case CommandID::REF_CMD_ID_DATA_TO_CUSTOM_CLIENT:
+        return sizeof(CustomData2);
+      case CommandID::REF_CMD_ID_RADAR_ENEMY_POS:
+        return sizeof(RadarEnemyRobotPos);
+      case CommandID::REF_CMD_ID_RADAR_ENEMY_HP:
+        return sizeof(RadarEnemyRobotHP);
+      case CommandID::REF_CMD_ID_RADAR_ENEMY_BULLET:
+        return sizeof(RadarEnemyBullet);
+      case CommandID::REF_CMD_ID_RADAR_ENEMY_INFO:
+        return sizeof(RadarEnemyState);
+      case CommandID::REF_CMD_ID_RADAR_ENEMY_BUFF:
+        return sizeof(RadarRobotBuff);
+      case CommandID::REF_CMD_ID_RADAR_ENEMY_KEY:
+        return sizeof(RadarEnemyKey);
+      case CommandID::REF_CMD_ID_INTER_STUDENT:
+        return -1;
+      default:
+        return -2;
+    }
+  }
+
+  static bool ValidInteraction(const uint8_t* payload, uint16_t length) {
+    if (payload == nullptr || length < 6U || length > 118U) return false;
+    const uint16_t id = payload[0] | static_cast<uint16_t>(payload[1] << 8U);
+    const size_t content = length - 6U;
+    if (id == 0x0120U && content == sizeof(SentryDecisionData)) {
+      const uint8_t stance = (payload[8] >> 5U) & 7U;
+      return stance >= 1U && stance <= 3U;
+    }
+    if (id == 0x0121U && content == sizeof(RadarDecisionData)) {
+      if (payload[7] > 2U) return false;
+      if (payload[7] != 0U) {
+        for (size_t i = 8U; i < 14U; ++i)
+          if (!((payload[i] >= '0' && payload[i] <= '9') ||
+                (payload[i] >= 'a' && payload[i] <= 'z') ||
+                (payload[i] >= 'A' && payload[i] <= 'Z')))
+            return false;
+      }
+      return true;
+    }
+    if (id >= 0x0200U && id <= 0x02ffU) return true;
+    switch (id) {
+      case 0x0100:
+        return content == sizeof(UILayerDelete);
+      case 0x0101:
+        return content == sizeof(UIFigure);
+      case 0x0102:
+        return content == sizeof(UIFigure2);
+      case 0x0103:
+        return content == sizeof(UIFigure5);
+      case 0x0104:
+        return content == sizeof(UIFigure7);
+      case 0x0110:
+        return content == sizeof(UICharacter);
+      case 0x0120:
+        return content == sizeof(SentryDecisionData);
+      case 0x0121:
+        return content == sizeof(RadarDecisionData);
+      default:
+        return false;
+    }
+  }
 
   static uint16_t FreshSourceMask(uint16_t valid_mask,
                                   const SourceTimes& received_ms,
@@ -1067,89 +1204,67 @@ class Referee {
    * @brief 增加哨兵本次要兑换的发弹量
    */
   LibXR::ErrorCode AddNeedBullet(uint16_t bullet_delta) {
-    if (bullet_delta == 0U) {
-      return LibXR::ErrorCode::ARG_ERR;
-    }
-
     LibXR::Mutex::LockGuard lock(tx_data_mutex_);
-    const uint32_t UPDATED_BULLET_NUM =
-        this->data_.sentry_dec_data.buy_bullet_num + bullet_delta;
-    if (UPDATED_BULLET_NUM > MAX_BUY_BULLET_NUM) {
-      return LibXR::ErrorCode::OUT_OF_RANGE;
-    }
-
-    this->data_.sentry_dec_data.buy_bullet_num = UPDATED_BULLET_NUM;
+    if (!decision_baseline_) return LibXR::ErrorCode::STATE_ERR;
+    if (bullet_delta == 0U) return LibXR::ErrorCode::ARG_ERR;
+    const uint32_t total = data_.sentry_dec_data.buy_bullet_num + bullet_delta;
+    if (total > MAX_BUY_BULLET_NUM) return LibXR::ErrorCode::OUT_OF_RANGE;
+    data_.sentry_dec_data.buy_bullet_num = total;
+    decision_pending_ = true;
     return LibXR::ErrorCode::OK;
   }
 
-  /**
-   * @brief 哨兵机器人是否确认复活
-   *
-   * @param revival 是否整活
-   */
   void SetConfirmRevival(bool revival) {
     LibXR::Mutex::LockGuard lock(tx_data_mutex_);
-    this->data_.sentry_dec_data.confirm_resurrection = revival;
+    if (data_.sentry_dec_data.confirm_resurrection != revival)
+      decision_pending_ = true;
+    data_.sentry_dec_data.confirm_resurrection = revival;
   }
 
-  /**
-   * @brief 请求一次哨兵远程兑换发弹量
-   */
   LibXR::ErrorCode RequestRemoteBulletExchange() {
     LibXR::Mutex::LockGuard lock(tx_data_mutex_);
-    if (this->data_.sentry_dec_data.remote_buy_bullet_times >=
-        MAX_REMOTE_BUY_BULLET_TIMES) {
+    if (!decision_baseline_) return LibXR::ErrorCode::STATE_ERR;
+    if (confirmed_remote_bullet_ + pending_remote_bullet_ >= 15U)
       return LibXR::ErrorCode::OUT_OF_RANGE;
-    }
-
-    this->data_.sentry_dec_data.remote_buy_bullet_times++;
+    ++pending_remote_bullet_;
+    data_.sentry_dec_data.remote_buy_bullet_times =
+        confirmed_remote_bullet_ + 1U;
+    decision_pending_ = true;
     return LibXR::ErrorCode::OK;
   }
 
-  /**
-   * @brief 哨兵远程兑换血量
-   *
-   */
-  void SetHPRemote() {
+  LibXR::ErrorCode SetHPRemote() {
     LibXR::Mutex::LockGuard lock(tx_data_mutex_);
-    this->data_.sentry_dec_data.romote_buy_hp_times += 1;
+    if (!decision_baseline_) return LibXR::ErrorCode::STATE_ERR;
+    if (confirmed_remote_hp_ + pending_remote_hp_ >= 15U)
+      return LibXR::ErrorCode::OUT_OF_RANGE;
+    ++pending_remote_hp_;
+    data_.sentry_dec_data.romote_buy_hp_times = confirmed_remote_hp_ + 1U;
+    decision_pending_ = true;
+    return LibXR::ErrorCode::OK;
   }
 
-  /**
-   * @brief 远程买活
-   *
-   * @param 是否整活
-   */
   void SetRevivalRemote(bool revival) {
     LibXR::Mutex::LockGuard lock(tx_data_mutex_);
-    this->data_.sentry_dec_data.buy_resurrection = revival;
+    data_.sentry_dec_data.buy_resurrection = revival;
+    decision_pending_ = true;
   }
 
-  /**
-   * @brief 哨兵修改姿态
-   *
-   * @param state 要切换的状态
-   */
-  void SetSwitchMode(State state) {
+  LibXR::ErrorCode SetSwitchMode(State state) {
+    const auto value = static_cast<uint8_t>(state);
+    if (value < 1U || value > 3U) return LibXR::ErrorCode::ARG_ERR;
     LibXR::Mutex::LockGuard lock(tx_data_mutex_);
-    this->data_.sentry_dec_data.current_state = static_cast<uint32_t>(state);
+    data_.sentry_dec_data.current_state = value;
+    decision_pending_ = true;
+    return LibXR::ErrorCode::OK;
   }
 
-  /**
-   * @brief 发送哨兵包
-   *
-   * @note 在定时器线程里，按裁判系统带宽要求调用这个函数
-   */
   LibXR::ErrorCode SendSentryPack() {
-    SentryDecisionData payload{};
-    {
-      LibXR::Mutex::LockGuard lock(tx_data_mutex_);
-      payload = this->data_.sentry_dec_data;
-      this->data_.sentry_dec_data.current_state = 0U;
-    }
-
-    return SendStudentCmd(CMDID::REF_STDNT_CMD_ID_SENTRY_CMD, GetRobotID(),
-                          0x8080, payload);
+    LibXR::Mutex::LockGuard lock(tx_data_mutex_);
+    if (!ValidRobotID(data_.robot_status.robot_id))
+      return LibXR::ErrorCode::STATE_ERR;
+    decision_pending_ = true;
+    return LibXR::ErrorCode::OK;
   }
 
   LibXR::ErrorCode SendRadarPack() {
@@ -1183,7 +1298,13 @@ class Referee {
         sem_(0),
         op_(sem_, REFEREE_RX_TIMEOUT_MS),
         sem_tx_(),
-        tx_op_(sem_tx_, 5000),
+        tx_callback_(LibXR::WriteOperation::Callback::Create(
+            [](bool, Referee* self, LibXR::ErrorCode result) {
+              self->tx_completion_.store(result, std::memory_order_relaxed);
+              self->tx_finished_.store(true, std::memory_order_release);
+            },
+            this)),
+        tx_op_(tx_callback_),
         cmd_(cmd),
         chassispack_topic_(LibXR::Topic::CreateTopic<ChassisPack>(
             referee_chassis_tp_name, nullptr, true)),
@@ -1194,6 +1315,8 @@ class Referee {
                 referee_robot_game_tp_name, nullptr, true)),
         radar_pack_topic_(LibXR::Topic::CreateTopic<RadarPack>(
             referee_radar_tp_name, nullptr, true)) {
+    video_link_ = baudrate == 921600U;
+    data_.sentry_dec_data.current_state = 3U;
     uart_->SetConfig({baudrate, LibXR::UART::Parity::NO_PARITY, 8, 1});
 
     this->thread_.Create(this, ThreadFunc, "Referee", task_stack_depth_uart,
@@ -1207,51 +1330,49 @@ class Referee {
     cmd_ = &cmd;
   }
 
+  // OK means admitted to the bounded queue; completion errors remain visible
+  // through GetLastTxError(), and the same frame is retained for retry.
   LibXR::ErrorCode SendFrame(CommandID cmd_id, const void* payload,
                              uint16_t PAYLOAD_LEN) {
-    LibXR::Mutex::LockGuard lock(tx_mutex_);
-    return SendFrameLocked(cmd_id, payload, PAYLOAD_LEN);
-  }
-
-  LibXR::ErrorCode SendFrameLocked(CommandID cmd_id, const void* payload,
-                                   uint16_t PAYLOAD_LEN) {
-    constexpr size_t HEADER_SIZE = sizeof(Header);
-    constexpr size_t CMD_ID_SIZE = sizeof(uint16_t);
-    constexpr size_t FRAME_TAIL_SIZE = sizeof(uint16_t);
-    const size_t TOTAL_SIZE =
-        HEADER_SIZE + CMD_ID_SIZE + PAYLOAD_LEN + FRAME_TAIL_SIZE;
-
-    if (TOTAL_SIZE > sizeof(tx_buf_)) {
+    const auto id = static_cast<uint16_t>(cmd_id);
+    const auto* bytes = static_cast<const uint8_t*>(payload);
+    const int expected = ExpectedPayloadSize(cmd_id);
+    if (expected == -2) return LibXR::ErrorCode::NOT_SUPPORT;
+    if (PAYLOAD_LEN > sizeof(PendingFrame::payload) ||
+        (PAYLOAD_LEN > 0 && payload == nullptr))
       return LibXR::ErrorCode::ARG_ERR;
+    if ((expected >= 0 && PAYLOAD_LEN != expected) ||
+        (expected == -1 && !ValidInteraction(bytes, PAYLOAD_LEN)))
+      return LibXR::ErrorCode::SIZE_ERR;
+    if (id == 0x0310U && !video_link_) return LibXR::ErrorCode::STATE_ERR;
+    if (id == 0x0301U) {
+      const uint16_t sender = bytes[2] | static_cast<uint16_t>(bytes[3] << 8U);
+      LibXR::Mutex::LockGuard lock(tx_data_mutex_);
+      if (!ValidRobotID(data_.robot_status.robot_id) ||
+          sender != data_.robot_status.robot_id)
+        return LibXR::ErrorCode::STATE_ERR;
     }
-
-    Header header{};
-    header.sof = 0xA5;
-    header.data_length = PAYLOAD_LEN;
-    header.seq = tx_seq_++;
-    header.crc8 = LibXR::CRC8::Calculate(&header, sizeof(Header) - 1);
-
-    size_t offset = 0;
-    LibXR::Memory::FastCopy(&tx_buf_[offset], &header, sizeof(header));
-    offset += sizeof(header);
-
-    // const uint16_t cmd_u16 = static_cast<uint16_t>(cmd_id);
-    tx_buf_[offset++] =
-        static_cast<uint8_t>(static_cast<uint16_t>(cmd_id) & 0xFF);
-    tx_buf_[offset++] =
-        static_cast<uint8_t>((static_cast<uint16_t>(cmd_id) >> 8) & 0xFF);
-
-    if (PAYLOAD_LEN > 0 && payload != nullptr) {
-      LibXR::Memory::FastCopy(&tx_buf_[offset], payload, PAYLOAD_LEN);
-      offset += PAYLOAD_LEN;
-    }
-
-    const uint16_t CRC16 = LibXR::CRC16::Calculate(tx_buf_, offset);
-    tx_buf_[offset++] = static_cast<uint8_t>(CRC16 & 0xFF);
-    tx_buf_[offset++] = static_cast<uint8_t>((CRC16 >> 8) & 0xFF);
-
-    return uart_->Write({tx_buf_, offset}, tx_op_);
+    PendingFrame frame{};
+    frame.command = cmd_id;
+    frame.length = PAYLOAD_LEN;
+    if (PAYLOAD_LEN != 0)
+      LibXR::Memory::FastCopy(frame.payload, payload, PAYLOAD_LEN);
+    const auto result = tx_queue_.Push(frame);
+    if (result != LibXR::ErrorCode::OK) tx_admission_errors_.fetch_add(1);
+    return result;
   }
+
+  // Retained API name; admission uses the same shared rate limiter as
+  // SendFrame.
+  LibXR::ErrorCode SendFrameLocked(CommandID cmd_id, const void* payload,
+                                   uint16_t length) {
+    return SendFrame(cmd_id, payload, length);
+  }
+
+  LibXR::ErrorCode GetLastTxError() const {
+    return tx_completion_.load(std::memory_order_acquire);
+  }
+  uint32_t GetTxAdmissionErrors() const { return tx_admission_errors_.load(); }
 
   template <typename PayloadType>
   LibXR::ErrorCode SendFrame(CommandID cmd_id, const PayloadType& payload) {
@@ -1263,7 +1384,7 @@ class Referee {
   LibXR::ErrorCode SendStudentCmd(CMDID data_cmd_id, uint16_t sender_id,
                                   uint16_t receiver_id,
                                   const PayloadType& payload) {
-    LibXR::Mutex::LockGuard lock(tx_mutex_);
+    if constexpr (sizeof(PayloadType) > 112U) return LibXR::ErrorCode::SIZE_ERR;
     struct [[gnu::packed]] {
       uint16_t data_cmd_id;
       uint16_t sender_id;
@@ -1274,12 +1395,19 @@ class Referee {
     interaction_pack.sender_id = sender_id;
     interaction_pack.receiver_id = receiver_id;
     interaction_pack.payload = payload;
-    return SendFrameLocked(CommandID::REF_CMD_ID_INTER_STUDENT,
-                           &interaction_pack,
-                           static_cast<uint16_t>(sizeof(interaction_pack)));
+    return SendFrame(CommandID::REF_CMD_ID_INTER_STUDENT, &interaction_pack,
+                     static_cast<uint16_t>(sizeof(interaction_pack)));
   }
 
-  uint16_t GetRobotID() const { return data_.robot_status.robot_id; }
+  uint16_t GetRobotID() const {
+    LibXR::Mutex::LockGuard lock(tx_data_mutex_);
+    return data_.robot_status.robot_id;
+  }
+
+  Data GetReceivedData() const {
+    LibXR::Mutex::LockGuard lock(tx_data_mutex_);
+    return data_;
+  }
 
   static void InitFigure(UIFigure& fig, const char* name, UIFigureOp op,
                          UIFigureType type, uint8_t layer, UIColor color,
@@ -1452,13 +1580,13 @@ class Referee {
 
   LibXR::ErrorCode SendSentryDecision(const SentryDecisionData& payload) {
     return SendStudentCmd(
-        CMDID::REF_STDNT_CMD_ID_SENTRY_CMD, data_.robot_status.robot_id,
+        CMDID::REF_STDNT_CMD_ID_SENTRY_CMD, GetRobotID(),
         static_cast<uint16_t>(ClientID::REF_CL_REFEREE_SERVER), payload);
   }
 
   LibXR::ErrorCode SendRadarDecision(const RadarDecisionData& payload) {
     return SendStudentCmd(
-        CMDID::REF_STDNT_CMD_ID_RADAR_CMD, data_.robot_status.robot_id,
+        CMDID::REF_STDNT_CMD_ID_RADAR_CMD, GetRobotID(),
         static_cast<uint16_t>(ClientID::REF_CL_REFEREE_SERVER), payload);
   }
 
@@ -1485,48 +1613,34 @@ class Referee {
    *
    */
   static void ThreadFunc(Referee* ref) {
-    while (1) {
-      ref->FindHeader();
-      ref->last_parse_ = ref->ParseData();
+    while (true) {
+      ref->ServiceTx();
+      ref->last_parse_ = ref->FindHeader() && ref->ParseData();
       ref->Publish();
-      // ref->uart_->Write(0b01010101, ref->op_);
-      LibXR::Thread::Sleep(10);
+      ref->MaintainLink();
+      ref->ServiceTx();
+      // Yield without imposing a per-frame delay on buffered UART traffic.
+      LibXR::Thread::Sleep(0);
     }
   }
 
-  /**
-   * @brief 寻找包头的函数，含阻塞
-   *
-   */
-  void FindHeader() {
-    while (1) {
-      /* 防编译器warning */
-      if (this->uart_->Read({&this->byte_, 1}, this->op_) !=
-          LibXR::ErrorCode::OK) {
-        this->data_.status = Status::OFFLINE;
-        PublishRefereeStatusIfChanged(false);
+  bool FindHeader() {
+    // The same bounded stream buffer retains partial headers across read waits.
+    for (size_t scan = 0; scan < sizeof(rx_stream_); ++scan) {
+      while (rx_size_ > 0 && rx_stream_[0] != 0xa5U) DiscardRx(1);
+      if (rx_size_ >= sizeof(Header)) {
+        if (LibXR::CRC8::Verify(rx_stream_, sizeof(Header))) {
+          LibXR::Memory::FastCopy(&pack_.header_, rx_stream_, sizeof(Header));
+          const size_t total = sizeof(Header) + sizeof(uint16_t) +
+                               pack_.header_.data_length + sizeof(uint16_t);
+          if (total <= sizeof(rx_stream_)) return true;
+        }
+        DiscardRx(1);
         continue;
       }
-
-      if (this->byte_ != 0xA5) {
-        continue;
-      }
-
-      this->pack_.header_.sof = this->byte_;
-      /* 包头读取失败时缓冲区是旧数据，不能参与 CRC8 校验，直接重新找包头 */
-      if (this->uart_->Read(
-              {reinterpret_cast<uint8_t*>(&this->pack_.header_) + 1,
-               sizeof(Header) - 1},
-              this->op_) != LibXR::ErrorCode::OK) {
-        continue;
-      }
-
-      if (LibXR::CRC8::Verify(reinterpret_cast<uint8_t*>(&this->pack_.header_),
-                              sizeof(Header))) {
-        this->data_.status = Status::RUNNING;
-        break;
-      }
+      if (!ReadRxByte()) return false;
     }
+    return false;
   }
 
   /**
@@ -1544,358 +1658,367 @@ class Referee {
       return false;
     }
 
-    if (this->uart_->Read({this->pack_.buf_, BYTES_AFTER_HEADER}, this->op_) !=
-        LibXR::ErrorCode::OK) {
+    const size_t total = sizeof(Header) + BYTES_AFTER_HEADER;
+    while (rx_size_ < total) {
+      if (!ReadRxByte()) return false;
+    }
+    if (!LibXR::CRC16::Verify(rx_stream_, total)) {
+      // Preserve any intact frame embedded after a truncated/bad frame.
+      DiscardRx(1);
       return false;
     }
-
-    if (!LibXR::CRC16::Verify(&this->pack_,
-                              sizeof(Header) + BYTES_AFTER_HEADER)) {
-      return false;
-    }
+    LibXR::Memory::FastCopy(&pack_, rx_stream_, total);
+    DiscardRx(total);
 
     const uint16_t CMD_ID = static_cast<uint16_t>(this->pack_.buf_[0]) |
                             (static_cast<uint16_t>(this->pack_.buf_[1]) << 8);
     const uint8_t* payload = &this->pack_.buf_[2];
 
+    const auto command_id = static_cast<CommandID>(CMD_ID);
+    const int expected = ExpectedPayloadSize(command_id);
+    if (expected == -2 || (expected >= 0 && PAYLOAD_LEN != expected) ||
+        (expected == -1 && !ValidInteraction(payload, PAYLOAD_LEN)))
+      return false;
     const auto COPY_PAYLOAD = [payload, PAYLOAD_LEN](auto& dst) -> bool {
-      if (PAYLOAD_LEN < sizeof(dst)) {
-        return false;
-      }
+      if (PAYLOAD_LEN != sizeof(dst)) return false;
       LibXR::Memory::FastCopy(&dst, payload, sizeof(dst));
       return true;
     };
 
-    this->data_.status = Status::RUNNING; /* 更新状态 */
-    this->last_wake_up_ = LibXR::Timebase::GetMilliseconds();
+    {
+      LibXR::Mutex::LockGuard lock(tx_data_mutex_);
+      switch (static_cast<CommandID>(CMD_ID)) {
+        case CommandID::REF_CMD_ID_GAME_STATUS: {
+          /* 0x0001, 比赛状态数据 */
+          if (!COPY_PAYLOAD(this->data_.game_status)) {
+            return false;
+          }
+          break;
+        }
 
-    switch (static_cast<CommandID>(CMD_ID)) {
-      case CommandID::REF_CMD_ID_GAME_STATUS: {
-        /* 0x0001, 比赛状态数据 */
-        if (!COPY_PAYLOAD(this->data_.game_status)) {
+        case CommandID::REF_CMD_ID_GAME_RESULT: {
+          /* 0x0002, 比赛结果数据 */
+          if (!COPY_PAYLOAD(this->data_.game_result)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_GAME_ROBOT_HP: {
+          /* 0x0003, 机器人血量数据 */
+          if (!COPY_PAYLOAD(this->data_.game_robot_hp)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_FIELD_EVENTS: {
+          /* 0x0101, 场地事件数据 */
+          if (!COPY_PAYLOAD(this->data_.field_event)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_WARNING: {
+          /* 0x0104, 裁判警告数据 */
+          if (!COPY_PAYLOAD(this->data_.warning)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_DART_COUNTDOWN: {
+          /* 0x0105, 飞镖发射相关数据 */
+          if (!COPY_PAYLOAD(this->data_.dart_countdown)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_ROBOT_STATUS: {
+          /* 0x0201, 机器人性能体系数据 */
+          if (!COPY_PAYLOAD(this->data_.robot_status)) {
+            return false;
+          }
+          this->robot_status_received_time_ms_ =
+              static_cast<uint32_t>(LibXR::Timebase::GetMilliseconds());
+          this->robot_status_received_ = true;
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_POWER_HEAT_DATA: {
+          /* 0x0202, 实时底盘缓冲能量和射击热量 */
+          if (!COPY_PAYLOAD(this->data_.power_heat)) {
+            return false;
+          }
+          this->power_heat_received_time_ms_ =
+              static_cast<uint32_t>(LibXR::Timebase::GetMilliseconds());
+          this->power_heat_received_ = true;
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_ROBOT_POS: {
+          /* 0x0203, 机器人位置数据 */
+          if (!COPY_PAYLOAD(this->data_.robot_pos)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_ROBOT_BUFF: {
+          /* 0x0204, 机器人增益和底盘能量数据 */
+          if (!COPY_PAYLOAD(this->data_.robot_buff)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_DRONE_ENERGY:
+          return false;  // legacy 2026
+
+        case CommandID::REF_CMD_ID_ROBOT_DMG: {
+          /* 0x0206, 伤害状态数据 */
+          if (!COPY_PAYLOAD(this->data_.robot_damage)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_LAUNCHER_DATA: {
+          /* 0x0207, 实时射击数据 */
+          if (!COPY_PAYLOAD(this->data_.launcher_data)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_BULLET_REMAINING: {
+          /* 0x0208, 允许发弹量 */
+          if (!COPY_PAYLOAD(this->data_.bullet_remain)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_RFID: {
+          /* 0x0209, 机器人 RFID 模块状态 */
+          if (!COPY_PAYLOAD(this->data_.rfid)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_DART_CLIENT: {
+          /* 0x020A, 飞镖选手端指令数据 */
+          if (!COPY_PAYLOAD(this->data_.dart_client)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_ROBOT_POS_TO_SENTRY: {
+          /* 0x020B, 地面机器人位置数据 -> 哨兵 */
+          if (!COPY_PAYLOAD(this->data_.sentry_pos)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_RADAR_MARK: {
+          /* 0x020C, 雷达标记进度数据 */
+          if (!COPY_PAYLOAD(this->data_.radar_mark_progress)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_SENTRY_DECISION: {
+          /* 0x020D, 哨兵自主决策相关信息同步 */
+          if (PAYLOAD_LEN != sizeof(SentryInfo) ||
+              !COPY_PAYLOAD(this->data_.sentry_decision)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_RADAR_DECISION: {
+          /* 0x020E, 雷达自主决策相关信息同步 */
+          if (!COPY_PAYLOAD(this->data_.radar_decision)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_INTER_STUDENT: {
+          /* 0x0301, 机器人交互数据 */
+          if (PAYLOAD_LEN < 6) {
+            return false;
+          }
+          LibXR::Memory::FastSet(
+              this->data_.robot_ineraction_data.user_data, 0,
+              sizeof(this->data_.robot_ineraction_data.user_data));
+          LibXR::Memory::FastCopy(&this->data_.robot_ineraction_data, payload,
+                                  6);
+          const size_t USER_DATA_LEN = std::min<size_t>(
+              PAYLOAD_LEN - 6,
+              sizeof(this->data_.robot_ineraction_data.user_data));
+          if (USER_DATA_LEN > 0) {
+            LibXR::Memory::FastCopy(this->data_.robot_ineraction_data.user_data,
+                                    payload + 6, USER_DATA_LEN);
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_INTER_STUDENT_CUSTOM: {
+          /* 0x0302, 自定义控制器和机器人（图传） */
+          if (!COPY_PAYLOAD(this->data_.custom_controller)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_CLIENT_MAP: {
+          /* 0x0303, 选手端小地图交互数据 */
+          if (!COPY_PAYLOAD(this->data_.client_map)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_KEYBOARD_MOUSE: {
+          /* 0x0304, 键鼠遥控数据 */
+          if (!COPY_PAYLOAD(this->data_.keyboard_mouse)) {
+            return false;
+          }
+          FeedVideoLinkRemoteToCMD(this->data_.keyboard_mouse);
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_MAP_ROBOT_DATA: {
+          /* 0x0305, 小地图接收雷达数据 */
+          if (!COPY_PAYLOAD(this->data_.map_robot_data)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_CUSTOM_KEYBOARD_MOUSE: {
+          /* 0x0306, 自定义控制器交互（键鼠模拟） */
+          if (!COPY_PAYLOAD(this->data_.custom_key_mouse_data)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_SENTRY_POS_DATA: {
+          /* 0x0307, 小地图接收路径数据 */
+          if (!COPY_PAYLOAD(this->data_.sentry_postion)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_ROBOT_POS_DATA: {
+          /* 0x0308, 选手端小地图接受机器人消息 */
+          if (!COPY_PAYLOAD(this->data_.robot_position)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_CUSTOM_RECV_DATA: {
+          /* 0x0309, 自定义控制器收包 */
+          if (!COPY_PAYLOAD(this->data_.custom_data1)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_DATA_TO_CUSTOM_CLIENT: {
+          /* 0x0310, 自定义客户端数据 */
+          if (!COPY_PAYLOAD(this->data_.custom_data2)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_SET_VIDEO_TRANS_CH: {
+          /* 0x0F01, 设置图传出图信道 (应答) */
+          if (!COPY_PAYLOAD(this->data_.set_vid_trans_ch)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_GET_VIDEO_TRANS_CH: {
+          /* 0x0F02, 查询当前出图信道 (应答) */
+          if (!COPY_PAYLOAD(this->data_.get_vid_trans_ch)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_RADAR_ENEMY_POS: {
+          /* 0x0A01, 对方机器人的位置坐标 */
+          if (!COPY_PAYLOAD(this->data_.radar_enemy_robot_pos)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_RADAR_ENEMY_HP: {
+          /* 0x0A02, 对方机器人的血量信息 */
+          if (!COPY_PAYLOAD(this->data_.radar_enemy_robot_hp)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_RADAR_ENEMY_BULLET: {
+          /* 0x0A03, 对方剩余发弹量 */
+          if (!COPY_PAYLOAD(this->data_.radar_enemy_bullet)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_RADAR_ENEMY_INFO: {
+          /* 0x0A04, 对方宏观状态信息 */
+          if (!COPY_PAYLOAD(this->data_.radar_enemy_state)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_RADAR_ENEMY_BUFF: {
+          /* 0x0A05, 对方增益效果 */
+          if (!COPY_PAYLOAD(this->data_.radar_robot_buff)) {
+            return false;
+          }
+          break;
+        }
+
+        case CommandID::REF_CMD_ID_RADAR_ENEMY_KEY: {
+          /* 0x0A06, 对方干扰波密钥 */
+          if (!COPY_PAYLOAD(this->data_.radar_enemy_key)) {
+            return false;
+          }
+          break;
+        }
+
+        default: {
+          /* 未知命令 */
           return false;
         }
-        break;
       }
-
-      case CommandID::REF_CMD_ID_GAME_RESULT: {
-        /* 0x0002, 比赛结果数据 */
-        if (!COPY_PAYLOAD(this->data_.game_result)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_GAME_ROBOT_HP: {
-        /* 0x0003, 机器人血量数据 */
-        if (!COPY_PAYLOAD(this->data_.game_robot_hp)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_FIELD_EVENTS: {
-        /* 0x0101, 场地事件数据 */
-        if (!COPY_PAYLOAD(this->data_.field_event)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_WARNING: {
-        /* 0x0104, 裁判警告数据 */
-        if (!COPY_PAYLOAD(this->data_.warning)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_DART_COUNTDOWN: {
-        /* 0x0105, 飞镖发射相关数据 */
-        if (!COPY_PAYLOAD(this->data_.dart_countdown)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_ROBOT_STATUS: {
-        /* 0x0201, 机器人性能体系数据 */
-        if (!COPY_PAYLOAD(this->data_.robot_status)) {
-          return false;
-        }
-        this->robot_status_received_time_ms_ =
-            static_cast<uint32_t>(LibXR::Timebase::GetMilliseconds());
-        this->robot_status_received_ = true;
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_POWER_HEAT_DATA: {
-        /* 0x0202, 实时底盘缓冲能量和射击热量 */
-        if (!COPY_PAYLOAD(this->data_.power_heat)) {
-          return false;
-        }
-        this->power_heat_received_time_ms_ =
-            static_cast<uint32_t>(LibXR::Timebase::GetMilliseconds());
-        this->power_heat_received_ = true;
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_ROBOT_POS: {
-        /* 0x0203, 机器人位置数据 */
-        if (!COPY_PAYLOAD(this->data_.robot_pos)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_ROBOT_BUFF: {
-        /* 0x0204, 机器人增益和底盘能量数据 */
-        if (!COPY_PAYLOAD(this->data_.robot_buff)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_DRONE_ENERGY: {
-        /* 0x0205, 老💡的宝贝，不知道是啥 */
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_ROBOT_DMG: {
-        /* 0x0206, 伤害状态数据 */
-        if (!COPY_PAYLOAD(this->data_.robot_damage)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_LAUNCHER_DATA: {
-        /* 0x0207, 实时射击数据 */
-        if (!COPY_PAYLOAD(this->data_.launcher_data)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_BULLET_REMAINING: {
-        /* 0x0208, 允许发弹量 */
-        if (!COPY_PAYLOAD(this->data_.bullet_remain)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_RFID: {
-        /* 0x0209, 机器人 RFID 模块状态 */
-        if (!COPY_PAYLOAD(this->data_.rfid)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_DART_CLIENT: {
-        /* 0x020A, 飞镖选手端指令数据 */
-        if (!COPY_PAYLOAD(this->data_.dart_client)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_ROBOT_POS_TO_SENTRY: {
-        /* 0x020B, 地面机器人位置数据 -> 哨兵 */
-        if (!COPY_PAYLOAD(this->data_.sentry_pos)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_RADAR_MARK: {
-        /* 0x020C, 雷达标记进度数据 */
-        if (!COPY_PAYLOAD(this->data_.radar_mark_progress)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_SENTRY_DECISION: {
-        /* 0x020D, 哨兵自主决策相关信息同步 */
-        if (PAYLOAD_LEN != sizeof(SentryInfo) ||
-            !COPY_PAYLOAD(this->data_.sentry_decision)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_RADAR_DECISION: {
-        /* 0x020E, 雷达自主决策相关信息同步 */
-        if (!COPY_PAYLOAD(this->data_.radar_decision)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_INTER_STUDENT: {
-        /* 0x0301, 机器人交互数据 */
-        if (PAYLOAD_LEN < 6) {
-          return false;
-        }
-        LibXR::Memory::FastSet(
-            this->data_.robot_ineraction_data.user_data, 0,
-            sizeof(this->data_.robot_ineraction_data.user_data));
-        LibXR::Memory::FastCopy(&this->data_.robot_ineraction_data, payload, 6);
-        const size_t USER_DATA_LEN = std::min<size_t>(
-            PAYLOAD_LEN - 6,
-            sizeof(this->data_.robot_ineraction_data.user_data));
-        if (USER_DATA_LEN > 0) {
-          LibXR::Memory::FastCopy(this->data_.robot_ineraction_data.user_data,
-                                  payload + 6, USER_DATA_LEN);
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_INTER_STUDENT_CUSTOM: {
-        /* 0x0302, 自定义控制器和机器人（图传） */
-        if (!COPY_PAYLOAD(this->data_.custom_controller)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_CLIENT_MAP: {
-        /* 0x0303, 选手端小地图交互数据 */
-        if (!COPY_PAYLOAD(this->data_.client_map)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_KEYBOARD_MOUSE: {
-        /* 0x0304, 键鼠遥控数据 */
-        if (!COPY_PAYLOAD(this->data_.keyboard_mouse)) {
-          return false;
-        }
-        FeedVideoLinkRemoteToCMD(this->data_.keyboard_mouse);
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_MAP_ROBOT_DATA: {
-        /* 0x0305, 小地图接收雷达数据 */
-        if (!COPY_PAYLOAD(this->data_.map_robot_data)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_CUSTOM_KEYBOARD_MOUSE: {
-        /* 0x0306, 自定义控制器交互（键鼠模拟） */
-        if (!COPY_PAYLOAD(this->data_.custom_key_mouse_data)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_SENTRY_POS_DATA: {
-        /* 0x0307, 小地图接收路径数据 */
-        if (!COPY_PAYLOAD(this->data_.sentry_postion)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_ROBOT_POS_DATA: {
-        /* 0x0308, 选手端小地图接受机器人消息 */
-        if (!COPY_PAYLOAD(this->data_.robot_position)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_CUSTOM_RECV_DATA: {
-        /* 0x0309, 自定义控制器收包 */
-        if (!COPY_PAYLOAD(this->data_.custom_data1)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_DATA_TO_CUSTOM_CLIENT: {
-        /* 0x0310, 自定义客户端数据 */
-        if (!COPY_PAYLOAD(this->data_.custom_data2)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_SET_VIDEO_TRANS_CH: {
-        /* 0x0F01, 设置图传出图信道 (应答) */
-        if (!COPY_PAYLOAD(this->data_.set_vid_trans_ch)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_GET_VIDEO_TRANS_CH: {
-        /* 0x0F02, 查询当前出图信道 (应答) */
-        if (!COPY_PAYLOAD(this->data_.get_vid_trans_ch)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_RADAR_ENEMY_POS: {
-        /* 0x0A01, 对方机器人的位置坐标 */
-        if (!COPY_PAYLOAD(this->data_.radar_enemy_robot_pos)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_RADAR_ENEMY_HP: {
-        /* 0x0A02, 对方机器人的血量信息 */
-        if (!COPY_PAYLOAD(this->data_.radar_enemy_robot_hp)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_RADAR_ENEMY_BULLET: {
-        /* 0x0A03, 对方剩余发弹量 */
-        if (!COPY_PAYLOAD(this->data_.radar_enemy_bullet)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_RADAR_ENEMY_INFO: {
-        /* 0x0A04, 对方宏观状态信息 */
-        if (!COPY_PAYLOAD(this->data_.radar_enemy_state)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_RADAR_ENEMY_BUFF: {
-        /* 0x0A05, 对方增益效果 */
-        if (!COPY_PAYLOAD(this->data_.radar_robot_buff)) {
-          return false;
-        }
-        break;
-      }
-
-      case CommandID::REF_CMD_ID_RADAR_ENEMY_KEY: {
-        /* 0x0A06, 对方干扰波密钥 */
-        if (!COPY_PAYLOAD(this->data_.radar_enemy_key)) {
-          return false;
-        }
-        break;
-      }
-
-      default: {
-        /* 未知命令 */
-        return false;
-      }
+      this->data_.status = Status::RUNNING;
     }
-    UpdateRefereeSource(static_cast<CommandID>(CMD_ID));
+    this->last_wake_up_ = LibXR::Timebase::GetMilliseconds();
+    UpdateRefereeSource(command_id);
+    if (command_id == CommandID::REF_CMD_ID_SENTRY_DECISION)
+      UpdateDecisionFeedback();
+    if (command_id == CommandID::REF_CMD_ID_GAME_STATUS) TrackMatchTransition();
     return true;
   }
 
@@ -2005,55 +2128,273 @@ class Referee {
   }
 
  private:
+  struct PendingFrame {
+    CommandID command{};
+    uint16_t length = 0;
+    uint8_t payload[503]{};
+    bool decision = false;
+  };
+
+  static bool ValidRobotID(uint16_t id) {
+    return (id >= 1U && id <= 11U) || (id >= 101U && id <= 111U);
+  }
+
+  void TrackMatchTransition() {
+    LibXR::Mutex::LockGuard lock(tx_data_mutex_);
+    const uint8_t stage = data_.game_status.game_progress;
+    // Only an observed end-of-match followed by preparation opens a reset.
+    if (stage == 5U) match_finished_ = true;
+    if (match_finished_ && stage >= 1U && stage <= 3U) {
+      new_match_pending_ = true;
+      match_finished_ = false;
+    }
+  }
+
+  void UpdateDecisionFeedback() {
+    LibXR::Mutex::LockGuard lock(tx_data_mutex_);
+    const uint32_t info = data_.sentry_decision.info_1;
+    const uint16_t bullets = info & 0x7ffU;
+    const uint8_t remote_bullet = (info >> 11U) & 0x0fU;
+    const uint8_t remote_hp = (info >> 15U) & 0x0fU;
+    if (!decision_baseline_ || (new_match_pending_ && bullets == 0U &&
+                                remote_bullet == 0U && remote_hp == 0U)) {
+      data_.sentry_dec_data.buy_bullet_num = bullets;
+      confirmed_remote_bullet_ = remote_bullet;
+      confirmed_remote_hp_ = remote_hp;
+      pending_remote_bullet_ = pending_remote_hp_ = 0;
+      data_.sentry_dec_data.remote_buy_bullet_times = remote_bullet;
+      data_.sentry_dec_data.romote_buy_hp_times = remote_hp;
+      decision_baseline_ = true;
+      new_match_pending_ = false;
+    } else {
+      // A decrease is not a new-match signal. Acknowledge only the outstanding
+      // +1 command, never consume more than one queued request per feedback.
+      if (pending_remote_bullet_ != 0U &&
+          remote_bullet == confirmed_remote_bullet_ + 1U) {
+        confirmed_remote_bullet_ = remote_bullet;
+        --pending_remote_bullet_;
+      }
+      if (pending_remote_hp_ != 0U && remote_hp == confirmed_remote_hp_ + 1U) {
+        confirmed_remote_hp_ = remote_hp;
+        --pending_remote_hp_;
+      }
+      data_.sentry_dec_data.remote_buy_bullet_times =
+          confirmed_remote_bullet_ + (pending_remote_bullet_ != 0U ? 1U : 0U);
+      data_.sentry_dec_data.romote_buy_hp_times =
+          confirmed_remote_hp_ + (pending_remote_hp_ != 0U ? 1U : 0U);
+    }
+    decision_pending_ = decision_pending_ || pending_remote_bullet_ != 0 ||
+                        pending_remote_hp_ != 0;
+  }
+
+  bool DecisionNeeded(uint32_t now) {
+    if (!referee_online_ || !ValidRobotID(data_.robot_status.robot_id))
+      return false;
+    const bool fresh_status =
+        robot_status_received_ && now - robot_status_received_time_ms_ <= 1000U;
+    auto& request = data_.sentry_dec_data;
+    if (!fresh_status || data_.robot_status.remain_hp != 0U)
+      request.confirm_resurrection = 0U;
+    return decision_pending_ ||
+           (fresh_status && request.confirm_resurrection) ||
+           (decision_baseline_ &&
+            (pending_remote_bullet_ != 0 || pending_remote_hp_ != 0 ||
+             request.buy_bullet_num > (data_.sentry_decision.info_1 & 0x7ffU) ||
+             request.current_state != data_.sentry_decision.CurrentStance()));
+  }
+
+  bool TxDue(CommandID command, uint32_t now) const {
+    if (command == CommandID::REF_CMD_ID_INTER_STUDENT)
+      return !interaction_attempted_ ||
+             now - last_interaction_attempt_ms_ >= 34U;
+    if (command == CommandID::REF_CMD_ID_MAP_ROBOT_DATA)
+      return !map_attempted_ || now - last_map_attempt_ms_ >= 200U;
+    if (command == CommandID::REF_CMD_ID_DATA_TO_CUSTOM_CLIENT)
+      return !custom_attempted_ || now - last_custom_attempt_ms_ >= 20U;
+    return true;
+  }
+
+  void ServiceTx() {
+    const uint32_t now =
+        static_cast<uint32_t>(LibXR::Timebase::GetMilliseconds());
+    if (tx_active_) {
+      if (!tx_finished_.load(std::memory_order_acquire)) return;
+      tx_active_ = false;
+      if (tx_completion_.load(std::memory_order_relaxed) ==
+          LibXR::ErrorCode::OK) {
+        tx_retry_ = false;
+      } else if (active_frame_.decision) {
+        // Preserve the merged request while allowing queued traffic its turn.
+        LibXR::Mutex::LockGuard lock(tx_data_mutex_);
+        decision_pending_ = true;
+        tx_retry_ = false;
+      } else {
+        // A failed ordinary request keeps its data, but need not monopolize
+        // the writer while another command is due. Hold it only if full.
+        tx_retry_ = tx_queue_.Push(active_frame_) != LibXR::ErrorCode::OK;
+      }
+    }
+    if (!tx_retry_) {
+      bool decision = false;
+      {
+        LibXR::Mutex::LockGuard lock(tx_data_mutex_);
+        decision = DecisionNeeded(now) &&
+                   TxDue(CommandID::REF_CMD_ID_INTER_STUDENT, now) &&
+                   (!last_was_decision_ || tx_queue_.Size() == 0U);
+        if (decision) {
+          active_frame_ = {};
+          active_frame_.command = CommandID::REF_CMD_ID_INTER_STUDENT;
+          active_frame_.length = 6U + sizeof(SentryDecisionData);
+          active_frame_.decision = true;
+          const uint16_t words[3] = {0x0120U, data_.robot_status.robot_id,
+                                     0x8080U};
+          LibXR::Memory::FastCopy(active_frame_.payload, words, sizeof(words));
+          LibXR::Memory::FastCopy(active_frame_.payload + 6U,
+                                  &data_.sentry_dec_data,
+                                  sizeof(SentryDecisionData));
+          decision_pending_ = false;
+        }
+      }
+      if (!decision) {
+        bool found = false;
+        const size_t count = tx_queue_.Size();
+        for (size_t i = 0; i < count; ++i) {
+          if (tx_queue_.Pop(active_frame_) != LibXR::ErrorCode::OK) break;
+          if (TxDue(active_frame_.command, now)) {
+            found = true;
+            break;
+          }
+          // Consumer frees one slot before requeue; hold a retry copy if a
+          // concurrent producer claimed that slot, rather than dropping data.
+          if (tx_queue_.Push(active_frame_) != LibXR::ErrorCode::OK) {
+            tx_retry_ = true;
+            return;
+          }
+        }
+        if (!found) return;
+      }
+    }
+    if (!TxDue(active_frame_.command, now)) return;
+    if (active_frame_.command == CommandID::REF_CMD_ID_INTER_STUDENT) {
+      LibXR::Mutex::LockGuard lock(tx_data_mutex_);
+      const uint16_t sender =
+          active_frame_.payload[2] | (active_frame_.payload[3] << 8U);
+      if (!ValidRobotID(data_.robot_status.robot_id) ||
+          (!active_frame_.decision && sender != data_.robot_status.robot_id)) {
+        tx_completion_.store(LibXR::ErrorCode::STATE_ERR);
+        tx_retry_ = false;
+        return;
+      }
+      if (active_frame_.decision && !referee_online_) {
+        tx_retry_ = false;
+        decision_pending_ = true;
+        return;
+      }
+      if (active_frame_.decision) {
+        // Refresh both identity and merged intent immediately before writing.
+        // A stale death report must not survive a failed UART attempt.
+        if (!robot_status_received_ ||
+            now - robot_status_received_time_ms_ > 1000U ||
+            data_.robot_status.remain_hp != 0U)
+          data_.sentry_dec_data.confirm_resurrection = 0U;
+        active_frame_.payload[2] = data_.robot_status.robot_id;
+        active_frame_.payload[3] = 0;
+        LibXR::Memory::FastCopy(active_frame_.payload + 6U,
+                                &data_.sentry_dec_data,
+                                sizeof(SentryDecisionData));
+      }
+    }
+    const auto id = active_frame_.command;
+    if (id == CommandID::REF_CMD_ID_INTER_STUDENT) {
+      interaction_attempted_ = true;
+      last_interaction_attempt_ms_ = now;
+    } else if (id == CommandID::REF_CMD_ID_MAP_ROBOT_DATA) {
+      map_attempted_ = true;
+      last_map_attempt_ms_ = now;
+    } else if (id == CommandID::REF_CMD_ID_DATA_TO_CUSTOM_CLIENT) {
+      custom_attempted_ = true;
+      last_custom_attempt_ms_ = now;
+    }
+    Header header{};
+    header.data_length = active_frame_.length;
+    header.seq = tx_seq_++;
+    header.crc8 = LibXR::CRC8::Calculate(&header, sizeof(Header) - 1U);
+    LibXR::Memory::FastCopy(tx_buf_, &header, sizeof(header));
+    const uint16_t cmd = static_cast<uint16_t>(id);
+    tx_buf_[5] = cmd & 0xffU;
+    tx_buf_[6] = cmd >> 8U;
+    LibXR::Memory::FastCopy(tx_buf_ + 7U, active_frame_.payload,
+                            active_frame_.length);
+    const size_t length = 7U + active_frame_.length;
+    const uint16_t crc = LibXR::CRC16::Calculate(tx_buf_, length);
+    tx_buf_[length] = crc & 0xffU;
+    tx_buf_[length + 1U] = crc >> 8U;
+    last_was_decision_ = active_frame_.decision;
+    tx_finished_.store(false, std::memory_order_release);
+    tx_active_ = true;
+    tx_retry_ = false;
+    const auto result = uart_->Write({tx_buf_, length + 2U}, tx_op_);
+    if (result != LibXR::ErrorCode::OK) {
+      tx_completion_.store(result, std::memory_order_relaxed);
+      tx_finished_.store(true, std::memory_order_release);
+    }
+  }
+
+  void DiscardRx(size_t count) {
+    rx_size_ -= count;
+    if (rx_size_ > 0) std::memmove(rx_stream_, rx_stream_ + count, rx_size_);
+  }
+
+  bool ReadRxByte() {
+    ServiceTx();
+    MaintainLink();
+    const auto now = static_cast<uint32_t>(LibXR::Timebase::GetMilliseconds());
+    if (rx_size_ != 0 && now - rx_last_byte_ms_ > 50U) {
+      // Restart header search as well as dropping the stale bytes. ParseData
+      // must not keep waiting for the length advertised by that old header.
+      rx_size_ = 0;
+      return false;
+    }
+    uint8_t value = 0;
+    if (uart_->Read({&value, 1}, op_) != LibXR::ErrorCode::OK) return false;
+    if (rx_size_ >= sizeof(rx_stream_)) DiscardRx(1);
+    rx_stream_[rx_size_++] = value;
+    rx_last_byte_ms_ =
+        static_cast<uint32_t>(LibXR::Timebase::GetMilliseconds());
+    return true;
+  }
+
+  void MaintainLink() {
+    const auto now = static_cast<uint32_t>(LibXR::Timebase::GetMilliseconds());
+    if (referee_online_ && now - static_cast<uint32_t>(last_wake_up_) > 1000U) {
+      {
+        LibXR::Mutex::LockGuard lock(tx_data_mutex_);
+        data_.status = Status::OFFLINE;
+        data_.sentry_dec_data.confirm_resurrection = 0U;
+      }
+      robot_status_received_ = power_heat_received_ = false;
+      PublishRefereeStatusIfChanged(false);
+      return;
+    }
+    const uint16_t fresh =
+        FreshSourceMask(source_valid_mask_, source_received_ms_, now);
+    if (fresh != robot_game_referee_pack_.source_fresh_mask) {
+      robot_game_referee_pack_.source_fresh_mask = fresh;
+      robot_game_referee_pack_.source_command_id = 0;
+      robot_game_referee_topic_.Publish(robot_game_referee_pack_);
+    }
+  }
+
   static constexpr uint32_t VIDEO_LINK_REMOTE_TIMEOUT_MS = 100;
 
   void UpdateRefereeSource(CommandID command_id) {
-    uint16_t source_mask = 0U;
-    switch (command_id) {
-      case CommandID::REF_CMD_ID_GAME_STATUS:
-        source_mask = SOURCE_GAME_STATUS;
-        break;
-      case CommandID::REF_CMD_ID_GAME_ROBOT_HP:
-        source_mask = SOURCE_ROBOT_HP;
-        robot_hp_received_time_ms_ =
-            static_cast<uint32_t>(LibXR::Timebase::GetMilliseconds());
-        break;
-      case CommandID::REF_CMD_ID_FIELD_EVENTS:
-        source_mask = SOURCE_FIELD_EVENT;
-        break;
-      case CommandID::REF_CMD_ID_ROBOT_STATUS:
-        source_mask = SOURCE_ROBOT_STATUS;
-        break;
-      case CommandID::REF_CMD_ID_POWER_HEAT_DATA:
-        source_mask = SOURCE_POWER_HEAT;
-        break;
-      case CommandID::REF_CMD_ID_ROBOT_POS:
-        source_mask = SOURCE_ROBOT_POS;
-        break;
-      case CommandID::REF_CMD_ID_ROBOT_POS_TO_SENTRY:
-        source_mask = SOURCE_SENTRY_POS;
-        sentry_pos_received_time_ms_ =
-            static_cast<uint32_t>(LibXR::Timebase::GetMilliseconds());
-        break;
-      case CommandID::REF_CMD_ID_SENTRY_DECISION:
-        source_mask = SOURCE_SENTRY_INFO;
-        break;
-      case CommandID::REF_CMD_ID_ROBOT_BUFF:
-        source_mask = SOURCE_ROBOT_BUFF;
-        break;
-      case CommandID::REF_CMD_ID_ROBOT_DMG:
-        source_mask = SOURCE_ROBOT_DAMAGE;
-        break;
-      case CommandID::REF_CMD_ID_BULLET_REMAINING:
-        source_mask = SOURCE_BULLET_REMAIN;
-        break;
-      case CommandID::REF_CMD_ID_RFID:
-        source_mask = SOURCE_RFID;
-        break;
-      default:
-        break;
-    }
-
+    const uint16_t source_mask = SourceMaskForCommand(command_id);
+    if (source_mask == SOURCE_ROBOT_HP)
+      robot_hp_received_time_ms_ =
+          static_cast<uint32_t>(LibXR::Timebase::GetMilliseconds());
+    if (source_mask == SOURCE_SENTRY_POS)
+      sentry_pos_received_time_ms_ =
+          static_cast<uint32_t>(LibXR::Timebase::GetMilliseconds());
     referee_online_ = true;
     source_command_id_ = static_cast<uint16_t>(command_id);
     source_valid_mask_ |= source_mask;
@@ -2126,10 +2467,25 @@ class Referee {
 
   /* 数据读取 */
   bool referee_online_ = false;
-  bool last_parse_; /* 上一次解包是否成功 */
+  bool last_parse_ = false; /* 上一次解包是否成功 */
+  bool video_link_ = false;
+  bool decision_baseline_ = false;
+  bool new_match_pending_ = false;
+  bool match_finished_ = false;
+  uint8_t confirmed_remote_bullet_ = 0, confirmed_remote_hp_ = 0;
+  uint8_t pending_remote_bullet_ = 0, pending_remote_hp_ = 0;
+  bool decision_pending_ = false;
+  bool interaction_attempted_ = false, map_attempted_ = false,
+       custom_attempted_ = false;
+  uint32_t last_interaction_attempt_ms_ = 0, last_map_attempt_ms_ = 0,
+           last_custom_attempt_ms_ = 0;
+  bool tx_active_ = false, tx_retry_ = false, last_was_decision_ = false;
+  std::atomic<bool> tx_finished_{false};
+  std::atomic<LibXR::ErrorCode> tx_completion_{LibXR::ErrorCode::OK};
+  std::atomic<uint32_t> tx_admission_errors_{0};
   Data data_{}; /* 数据包本体 */
 
-  ChassisPack cp_; /* 发给底盘的数据包缓冲 */
+  ChassisPack cp_;  /* 发给底盘的数据包缓冲 */
   LauncherPack lp_; /* 发给发射的数据包缓冲 */
   RobotGameRefereePack robot_game_referee_pack_; /* 裁判系统摘要包缓冲 */
   RadarPack radar_pack_;
@@ -2144,7 +2500,7 @@ class Referee {
   uint32_t sentry_pos_received_time_ms_ = 0U;
   uint32_t robot_hp_received_time_ms_ = 0U;
   LibXR::MillisecondTimestamp
-      video_link_remote_last_time_{};     /* 图传键鼠最近一次写入 CMD 的时间 */
+      video_link_remote_last_time_{}; /* 图传键鼠最近一次写入 CMD 的时间 */
   bool video_link_remote_online_ = false; /* 图传键鼠在线锁存，超时后清零 */
   CMD::Data video_link_pending_{};
   bool video_link_dirty_ = false;
@@ -2154,19 +2510,23 @@ class Referee {
   /* 协议,数据流 */
   struct [[gnu::packed]] {
     Header header_;
-    uint8_t buf_[251]; /* 缓冲区，对齐256 */
+    uint8_t buf_[507]; /* 完整帧容量 512 */
   } pack_;
-  uint8_t tx_buf_[256]{};
+  uint8_t tx_buf_[512]{};
+  uint8_t rx_stream_[512]{};
+  size_t rx_size_ = 0;
+  uint32_t rx_last_byte_ms_ = 0;
   uint8_t tx_seq_ = 0;
-  uint8_t byte_ = 0;
 
+  PendingFrame active_frame_{};
+  LibXR::MPMCQueue<PendingFrame> tx_queue_{8};
   LibXR::UART* uart_;
   LibXR::Semaphore sem_;
   LibXR::ReadOperation op_;
   LibXR::Semaphore sem_tx_;
+  LibXR::WriteOperation::Callback tx_callback_;
   LibXR::WriteOperation tx_op_;
-  LibXR::Mutex tx_mutex_;
-  LibXR::Mutex tx_data_mutex_;
+  mutable LibXR::Mutex tx_data_mutex_;
   LibXR::Mutex video_link_mutex_;
   CMD* cmd_;
   LibXR::Topic chassispack_topic_;
@@ -2174,6 +2534,6 @@ class Referee {
   LibXR::Topic robot_game_referee_topic_;
   LibXR::Topic radar_pack_topic_;
   /* 线程相关 */
-  LibXR::MillisecondTimestamp last_wake_up_; /* ms */
+  LibXR::MillisecondTimestamp last_wake_up_{}; /* ms */
   LibXR::Thread thread_;
 };
